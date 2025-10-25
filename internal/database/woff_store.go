@@ -7,9 +7,10 @@ import (
 	"time"
 )
 
-// WOFFUser represents a WOFF user stored in the database
+// WOFFUser represents an OAuth user (WOFF or LINE) stored in the database
 type WOFFUser struct {
 	UserID       string
+	Provider     string // "woff" or "line"
 	UserName     string
 	DisplayName  string
 	RefreshToken string
@@ -45,18 +46,25 @@ func (s *WOFFStore) SaveUser(user *WOFFUser) error {
 		return fmt.Errorf("failed to count users: %w", err)
 	}
 
+	// デフォルトプロバイダー設定
+	provider := user.Provider
+	if provider == "" {
+		provider = "woff"
+	}
+
 	// Upsert user
 	query := `
-		INSERT INTO woff_users (user_id, user_name, display_name, refresh_token, updated_at)
-		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO woff_users (user_id, provider, user_name, display_name, refresh_token, updated_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(user_id) DO UPDATE SET
+			provider = excluded.provider,
 			user_name = excluded.user_name,
 			display_name = excluded.display_name,
 			refresh_token = excluded.refresh_token,
 			updated_at = CURRENT_TIMESTAMP
 	`
 
-	_, err = tx.Exec(query, user.UserID, user.UserName, user.DisplayName, user.RefreshToken)
+	_, err = tx.Exec(query, user.UserID, provider, user.UserName, user.DisplayName, user.RefreshToken)
 	if err != nil {
 		return fmt.Errorf("failed to save user: %w", err)
 	}
@@ -105,7 +113,7 @@ func (s *WOFFStore) SaveUser(user *WOFFUser) error {
 // GetUser retrieves a user by user ID (deleted_at IS NULL のみ)
 func (s *WOFFStore) GetUser(userID string) (*WOFFUser, error) {
 	query := `
-		SELECT user_id, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
+		SELECT user_id, provider, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
 		FROM woff_users
 		WHERE user_id = ? AND deleted_at IS NULL
 	`
@@ -113,6 +121,7 @@ func (s *WOFFStore) GetUser(userID string) (*WOFFUser, error) {
 	var user WOFFUser
 	err := s.db.conn.QueryRow(query, userID).Scan(
 		&user.UserID,
+		&user.Provider,
 		&user.UserName,
 		&user.DisplayName,
 		&user.RefreshToken,
@@ -141,7 +150,7 @@ func (s *WOFFStore) GetUser(userID string) (*WOFFUser, error) {
 // GetUserByUsername retrieves a user by username (deleted_at IS NULL のみ)
 func (s *WOFFStore) GetUserByUsername(username string) (*WOFFUser, error) {
 	query := `
-		SELECT user_id, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
+		SELECT user_id, provider, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
 		FROM woff_users
 		WHERE user_name = ? AND deleted_at IS NULL
 	`
@@ -149,6 +158,7 @@ func (s *WOFFStore) GetUserByUsername(username string) (*WOFFUser, error) {
 	var user WOFFUser
 	err := s.db.conn.QueryRow(query, username).Scan(
 		&user.UserID,
+		&user.Provider,
 		&user.UserName,
 		&user.DisplayName,
 		&user.RefreshToken,
@@ -292,14 +302,14 @@ func (s *WOFFStore) ListUsersWithDeleted(limit, offset int, includeDeleted bool)
 	var query string
 	if includeDeleted {
 		query = `
-			SELECT user_id, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
+			SELECT user_id, provider, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
 			FROM woff_users
 			ORDER BY created_at DESC
 			LIMIT ? OFFSET ?
 		`
 	} else {
 		query = `
-			SELECT user_id, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
+			SELECT user_id, provider, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
 			FROM woff_users
 			WHERE deleted_at IS NULL
 			ORDER BY created_at DESC
@@ -318,6 +328,7 @@ func (s *WOFFStore) ListUsersWithDeleted(limit, offset int, includeDeleted bool)
 		var user WOFFUser
 		err := rows.Scan(
 			&user.UserID,
+			&user.Provider,
 			&user.UserName,
 			&user.DisplayName,
 			&user.RefreshToken,
@@ -393,7 +404,7 @@ func (s *WOFFStore) getUserRoles(userID string) ([]string, error) {
 // SearchUsers searches active users by username or display name
 func (s *WOFFStore) SearchUsers(query string, limit int) ([]*WOFFUser, error) {
 	searchQuery := `
-		SELECT user_id, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
+		SELECT user_id, provider, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
 		FROM woff_users
 		WHERE (user_name LIKE ? OR display_name LIKE ?) AND deleted_at IS NULL
 		ORDER BY created_at DESC
@@ -412,6 +423,7 @@ func (s *WOFFStore) SearchUsers(query string, limit int) ([]*WOFFUser, error) {
 		var user WOFFUser
 		err := rows.Scan(
 			&user.UserID,
+			&user.Provider,
 			&user.UserName,
 			&user.DisplayName,
 			&user.RefreshToken,
@@ -578,7 +590,7 @@ func (s *WOFFStore) ensureAtLeastOneAdmin(excludeUserID string) error {
 // ListDeletedUsers returns all deleted users
 func (s *WOFFStore) ListDeletedUsers(limit, offset int) ([]*WOFFUser, error) {
 	query := `
-		SELECT user_id, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
+		SELECT user_id, provider, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
 		FROM woff_users
 		WHERE deleted_at IS NOT NULL
 		ORDER BY deleted_at DESC
@@ -596,6 +608,7 @@ func (s *WOFFStore) ListDeletedUsers(limit, offset int) ([]*WOFFUser, error) {
 		var user WOFFUser
 		err := rows.Scan(
 			&user.UserID,
+			&user.Provider,
 			&user.UserName,
 			&user.DisplayName,
 			&user.RefreshToken,
@@ -631,7 +644,7 @@ func (s *WOFFStore) GetUsersByRole(role string, limit, offset int) ([]*WOFFUser,
 	}
 
 	query := `
-		SELECT DISTINCT u.user_id, u.user_name, u.display_name, u.refresh_token, u.deleted_at, u.created_at, u.updated_at
+		SELECT DISTINCT u.user_id, u.provider, u.user_name, u.display_name, u.refresh_token, u.deleted_at, u.created_at, u.updated_at
 		FROM woff_users u
 		INNER JOIN woff_user_roles r ON u.user_id = r.user_id
 		WHERE r.role = ? AND u.deleted_at IS NULL
@@ -650,6 +663,7 @@ func (s *WOFFStore) GetUsersByRole(role string, limit, offset int) ([]*WOFFUser,
 		var user WOFFUser
 		err := rows.Scan(
 			&user.UserID,
+			&user.Provider,
 			&user.UserName,
 			&user.DisplayName,
 			&user.RefreshToken,

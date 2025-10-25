@@ -176,6 +176,12 @@ func (s *woffAuthServer) GetAuthorizationURL(ctx context.Context, req *authv1.Ge
 func (s *woffAuthServer) ExchangeCode(ctx context.Context, req *authv1.ExchangeCodeRequest) (*authv1.ExchangeCodeResponse, error) {
 	log.Printf("ExchangeCode request: code=%s..., redirect_uri=%s", req.Code[:10], req.RedirectUri)
 
+	// プロバイダーの設定（デフォルトはwoff）
+	provider := req.Provider
+	if provider == "" {
+		provider = "woff"
+	}
+
 	// キャッシュをチェック - 同じcodeで既に処理済みの場合はキャッシュを返す
 	if cachedResp, ok := s.responseCache.Load(req.Code); ok {
 		log.Printf("✅ キャッシュされたレスポンスを返します (重複リクエスト対策): code=%s...", req.Code[:10])
@@ -232,6 +238,7 @@ func (s *woffAuthServer) ExchangeCode(ctx context.Context, req *authv1.ExchangeC
 	if s.woffStore != nil {
 		dbUser := &database.WOFFUser{
 			UserID:       userInfo.UserID,
+			Provider:     provider,
 			UserName:     userInfo.UserName.FullName(),
 			DisplayName:  userInfo.NickName,
 			RefreshToken: tokenResp.RefreshToken,
@@ -260,6 +267,7 @@ func (s *woffAuthServer) ExchangeCode(ctx context.Context, req *authv1.ExchangeC
 		TokenType:       tokenResp.TokenType,
 		Scope:           scopes,
 		UserId:          userInfo.UserID,
+		Provider:        provider,
 		UserName:        userInfo.UserName.FullName(),
 		Email:           userInfo.Email,
 		DisplayName:     userInfo.NickName,
@@ -295,6 +303,7 @@ func (s *woffAuthServer) GetProfile(ctx context.Context, req *authv1.GetProfileR
 
 	return &authv1.GetProfileResponse{
 		UserId:          userInfo.UserID,
+		Provider:        "woff", // GetProfileはWOFFトークンから取得するため常にwoff
 		UserName:        userInfo.UserName.FullName(),
 		Email:           userInfo.Email,
 		DisplayName:     userInfo.NickName, // Use NickName as DisplayName
@@ -380,6 +389,7 @@ func (s *woffAuthServer) ListUsers(ctx context.Context, req *authv1.ListUsersReq
 	for i, user := range users {
 		pbUsers[i] = &authv1.User{
 			UserId:      user.UserID,
+			Provider:    user.Provider,
 			UserName:    user.UserName,
 			DisplayName: user.DisplayName,
 			Roles:       user.Roles,

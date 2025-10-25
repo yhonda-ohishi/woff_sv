@@ -34,11 +34,12 @@ service AuthService {
   rpc RestoreUser(RestoreUserRequest) returns (RestoreUserResponse);
 }
 
-// Request to get WOFF OAuth authorization URL
+// Request to get OAuth authorization URL
 message GetAuthorizationURLRequest {
-  string redirect_uri = 1;
-  string state = 2; // CSRF protection state
-  repeated string scopes = 3; // Optional scopes
+  string provider = 1; // "woff" or "line" (default: "woff")
+  string redirect_uri = 2;
+  string state = 3; // CSRF protection state
+  repeated string scopes = 4; // Optional scopes
 }
 
 // Response containing the authorization URL
@@ -49,12 +50,13 @@ message GetAuthorizationURLResponse {
 
 // Request to exchange authorization code for tokens
 message ExchangeCodeRequest {
-  string code = 1;
-  string redirect_uri = 2;
-  string state = 3; // CSRF verification
+  string provider = 1; // "woff" or "line" (default: "woff")
+  string code = 2;
+  string redirect_uri = 3;
+  string state = 4; // CSRF verification
 }
 
-// Response containing WOFF access tokens and user info
+// Response containing OAuth access tokens and user info
 message ExchangeCodeResponse {
   string access_token = 1;
   string refresh_token = 2;
@@ -63,12 +65,13 @@ message ExchangeCodeResponse {
   repeated string scope = 5;
   // User information (included for convenience)
   string user_id = 6;
-  string user_name = 7;
-  string email = 8;
-  string display_name = 9;
-  string domain_id = 10;
-  repeated string roles = 11;
-  string profile_image_url = 12;
+  string provider = 7;  // "woff" or "line"
+  string user_name = 8;
+  string email = 9;
+  string display_name = 10;
+  string domain_id = 11;
+  repeated string roles = 12;
+  string profile_image_url = 13;
 }
 
 message GetProfileRequest {
@@ -77,12 +80,13 @@ message GetProfileRequest {
 
 message GetProfileResponse {
   string user_id = 1;
-  string user_name = 2;
-  string email = 3;
-  string display_name = 4;
-  string domain_id = 5;
-  repeated string roles = 6;
-  string profile_image_url = 7;
+  string provider = 2;  // "woff" or "line"
+  string user_name = 3;
+  string email = 4;
+  string display_name = 5;
+  string domain_id = 6;
+  repeated string roles = 7;
+  string profile_image_url = 8;
 }
 
 message RefreshTokenRequest {
@@ -114,12 +118,13 @@ message ListUsersRequest {
 
 message User {
   string user_id = 1;
-  string user_name = 2;
-  string display_name = 3;
-  repeated string roles = 4;
-  string created_at = 5;
-  string updated_at = 6;
-  bool is_deleted = 7;
+  string provider = 2;  // "woff" or "line"
+  string user_name = 3;
+  string display_name = 4;
+  repeated string roles = 5;
+  string created_at = 6;
+  string updated_at = 7;
+  bool is_deleted = 8;
 }
 
 message ListUsersResponse {

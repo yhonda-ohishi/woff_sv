@@ -46,9 +46,10 @@ func (db *DB) GetConn() *sql.DB {
 // Migrate runs database migrations
 func (db *DB) Migrate() error {
 	schema := `
-	-- WOFFユーザーテーブル
+	-- OAuth ユーザーテーブル (WOFF/LINE両方対応)
 	CREATE TABLE IF NOT EXISTS woff_users (
 		user_id TEXT PRIMARY KEY,
+		provider TEXT NOT NULL DEFAULT 'woff',  -- 'woff' or 'line'
 		user_name TEXT,
 		display_name TEXT,
 		refresh_token TEXT,
@@ -75,6 +76,24 @@ func (db *DB) Migrate() error {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
+	// 既存テーブルにproviderカラムがない場合は追加
+	_, err = db.conn.Exec(`ALTER TABLE woff_users ADD COLUMN provider TEXT NOT NULL DEFAULT 'woff'`)
+	if err != nil {
+		// カラムが既に存在する場合はエラーを無視
+		if !contains(err.Error(), "duplicate column") {
+			log.Printf("Warning: Could not add provider column (may already exist): %v", err)
+		}
+	}
+
 	log.Println("Database migrations completed successfully")
 	return nil
+}
+
+func contains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
