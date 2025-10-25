@@ -6,12 +6,15 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	authv1 "github.com/example/jwt-grpc-server/gen/auth/v1"
 	"github.com/example/jwt-grpc-server/internal/auth"
 	"github.com/example/jwt-grpc-server/internal/database"
 	"github.com/example/jwt-grpc-server/internal/interceptor"
+	"github.com/example/jwt-grpc-server/internal/tunnel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
@@ -242,6 +245,9 @@ func main() {
 		fmt.Sscanf(portEnv, "%d", &port)
 	}
 
+	// Check if Cloudflared tunnel should be enabled
+	enableTunnel := os.Getenv("ENABLE_CLOUDFLARED") == "true"
+
 	// Start listening
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -251,13 +257,59 @@ func main() {
 	log.Printf("gRPC server with WOFF authentication listening on port %d", port)
 	log.Printf("WOFF Client ID: %s", clientID)
 	log.Printf("Redirect URI: %s", redirectURI)
+
+	// Start Cloudflare Tunnel if enabled
+	var cloudflaredTunnel *tunnel.CloudflaredTunnel
+	if enableTunnel {
+		log.Println("\n🚀 Starting Cloudflare Tunnel...")
+		cloudflaredTunnel = tunnel.NewCloudflaredTunnel(port)
+
+		ctx := context.Background()
+		publicURL, err := cloudflaredTunnel.Start(ctx)
+		if err != nil {
+			log.Printf("⚠️  Failed to start Cloudflare Tunnel: %v", err)
+			log.Println("Continuing without public URL...")
+		} else {
+			log.Printf("\n╔════════════════════════════════════════════════════════════╗")
+			log.Printf("║  🌐 Public URL: %-42s ║", publicURL)
+			log.Printf("║  🔗 gRPC URL:   %-42s ║", cloudflaredTunnel.GetGRPCURL())
+			log.Printf("╚════════════════════════════════════════════════════════════╝\n")
+		}
+	}
+
 	log.Printf("\nTo start authentication flow:")
 	log.Printf("1. Call GetAuthorizationURL to get the authorization URL")
 	log.Printf("2. Direct user to the authorization URL")
 	log.Printf("3. After user authorizes, exchange the code with ExchangeCode")
 	log.Printf("4. Use the access token to call GetProfile")
 
-	if err := grpcServer.Serve(listener); err != nil {
+	// Setup graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Start server in a goroutine
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := grpcServer.Serve(listener); err != nil {
+			serverErr <- err
+		}
+	}()
+
+	// Wait for shutdown signal or server error
+	select {
+	case <-sigChan:
+		log.Println("\n🛑 Shutdown signal received, stopping server...")
+	case err := <-serverErr:
 		log.Fatalf("Failed to serve: %v", err)
 	}
+
+	// Graceful shutdown
+	grpcServer.GracefulStop()
+
+	// Stop Cloudflare Tunnel
+	if cloudflaredTunnel != nil {
+		cloudflaredTunnel.Stop()
+	}
+
+	log.Println("✅ Server stopped gracefully")
 }

@@ -47,6 +47,12 @@ cp .env.example .env
 WOFF_CLIENT_ID=your-actual-client-id
 WOFF_CLIENT_SECRET=your-actual-client-secret
 WOFF_REDIRECT_URI=http://localhost:8080/callback
+
+# Database Configuration
+DATABASE_PATH=woff.db
+
+# Cloudflare Tunnel (公開URLを自動生成)
+ENABLE_CLOUDFLARED=true
 ```
 
 ### 2. 依存関係のインストール
@@ -273,11 +279,59 @@ const profile = await client.getProfile(
 );
 ```
 
+## 🌐 Cloudflare Tunnel（公開URL自動生成）
+
+### 機能
+サーバー起動時に自動的にCloudflare Tunnelを起動し、インターネットからアクセス可能な公開URLを生成します。
+
+### 前提条件
+Cloudflaredのインストールが必要です：
+
+**Windows:**
+```bash
+winget install --id Cloudflare.cloudflared
+```
+
+**Mac:**
+```bash
+brew install cloudflared
+```
+
+**Linux:**
+```bash
+# Debian/Ubuntu
+wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+sudo dpkg -i cloudflared-linux-amd64.deb
+```
+
+### 使い方
+
+1. 環境変数で有効化：
+```bash
+ENABLE_CLOUDFLARED=true
+```
+
+2. サーバー起動時に自動的に公開URLが表示されます：
+```
+🚀 Starting Cloudflare Tunnel...
+✅ Cloudflare Tunnel started successfully!
+╔════════════════════════════════════════════════════════════╗
+║  🌐 Public URL: https://abc-def-123.trycloudflare.com    ║
+║  🔗 gRPC URL:   abc-def-123.trycloudflare.com             ║
+╚════════════════════════════════════════════════════════════╝
+```
+
+3. この公開URLを使ってどこからでもgRPCサーバーにアクセス可能
+
+### 注意事項
+- 無料のCloudflare Tunnelは一時的なURLを提供（サーバー再起動で変わります）
+- 本番環境では固定のCloudflare Tunnelを使用することを推奨
+
 ## 🔧 カスタマイズ
 
 ### スコープの変更
 
-[cmd/server/woff_main.go:138](cmd/server/woff_main.go#L138):
+[cmd/server/woff_main.go](cmd/server/woff_main.go):
 
 ```go
 woffConfig := &auth.WOFFConfig{
