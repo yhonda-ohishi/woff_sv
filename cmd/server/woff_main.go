@@ -80,20 +80,22 @@ func (s *woffAuthServer) ExchangeCode(ctx context.Context, req *authv1.ExchangeC
 		return nil, status.Errorf(codes.Internal, "failed to get user info: %v", err)
 	}
 
-	// Save user to database
-	dbUser := &database.WOFFUser{
-		UserID:       userInfo.UserID,
-		UserName:     userInfo.UserName,
-		DisplayName:  userInfo.DisplayName,
-		RefreshToken: tokenResp.RefreshToken,
-		Roles:        userInfo.Roles,
-	}
+	// Save user to database (if available)
+	if s.woffStore != nil {
+		dbUser := &database.WOFFUser{
+			UserID:       userInfo.UserID,
+			UserName:     userInfo.UserName,
+			DisplayName:  userInfo.DisplayName,
+			RefreshToken: tokenResp.RefreshToken,
+			Roles:        userInfo.Roles,
+		}
 
-	if err := s.woffStore.SaveUser(dbUser); err != nil {
-		log.Printf("Failed to save user to database: %v", err)
-		// Don't fail the request, just log the error
-	} else {
-		log.Printf("User saved to database: %s", userInfo.UserID)
+		if err := s.woffStore.SaveUser(dbUser); err != nil {
+			log.Printf("Failed to save user to database: %v", err)
+			// Don't fail the request, just log the error
+		} else {
+			log.Printf("User saved to database: %s", userInfo.UserID)
+		}
 	}
 
 	log.Printf("Successfully exchanged code for tokens")
@@ -191,20 +193,26 @@ func main() {
 		log.Printf("DATABASE_PATH not set, using default: %s", dbPath)
 	}
 
-	// Initialize database
+	// Initialize database (optional)
+	var woffStore *database.WOFFStore
 	db, err := database.NewDB(dbPath)
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
-	}
-	defer db.Close()
+		log.Printf("⚠️  Database connection failed: %v", err)
+		log.Println("⚠️  Running without database (user data will not be persisted)")
+		log.Println("💡 To enable database: Install MinGW-w64 (gcc) and rebuild with CGO_ENABLED=1")
+	} else {
+		defer db.Close()
 
-	// Run migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
+		// Run migrations
+		if err := db.Migrate(); err != nil {
+			log.Printf("⚠️  Database migration failed: %v", err)
+			log.Println("⚠️  Running without database")
+		} else {
+			// Create WOFF store
+			woffStore = database.NewWOFFStore(db)
+			log.Println("✅ Database connected successfully")
+		}
 	}
-
-	// Create WOFF store
-	woffStore := database.NewWOFFStore(db)
 
 	// Create WOFF manager
 	woffConfig := &auth.WOFFConfig{
