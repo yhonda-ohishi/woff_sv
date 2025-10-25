@@ -38,8 +38,9 @@ func (s *WOFFStore) SaveUser(user *WOFFUser) error {
 	defer tx.Rollback()
 
 	// Check if this is the first user (make them admin)
+	// 削除済みユーザーを除外してカウント
 	var userCount int
-	err = tx.QueryRow("SELECT COUNT(*) FROM woff_users").Scan(&userCount)
+	err = tx.QueryRow("SELECT COUNT(*) FROM woff_users WHERE deleted_at IS NULL").Scan(&userCount)
 	if err != nil {
 		return fmt.Errorf("failed to count users: %w", err)
 	}
