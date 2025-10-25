@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -40,20 +41,56 @@ type WOFFConfig struct {
 type WOFFTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
-	ExpiresIn    int64  `json:"expires_in"`
+	ExpiresIn    int64  `json:"expires_in,string"` // LINE WORKS returns this as a string
 	RefreshToken string `json:"refresh_token"`
 	Scope        string `json:"scope"`
+	IDToken      string `json:"id_token"` // ID Token (openid scope required)
+}
+
+// FlexibleString can unmarshal from either a string or a number
+type FlexibleString string
+
+func (fs *FlexibleString) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as string first
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*fs = FlexibleString(s)
+		return nil
+	}
+
+	// Try to unmarshal as number
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err == nil {
+		*fs = FlexibleString(n.String())
+		return nil
+	}
+
+	return fmt.Errorf("value must be string or number")
+}
+
+// WOFFUserName represents the user name structure from LINE WORKS
+type WOFFUserName struct {
+	LastName          string `json:"lastName"`
+	FirstName         string `json:"firstName"`
+	PhoneticLastName  string `json:"phoneticLastName"`
+	PhoneticFirstName string `json:"phoneticFirstName"`
+}
+
+// FullName returns the full name
+func (n WOFFUserName) FullName() string {
+	return n.LastName + " " + n.FirstName
 }
 
 // WOFFUserInfo represents user information from WOFF
 type WOFFUserInfo struct {
-	UserID          string   `json:"userId"`
-	UserName        string   `json:"userName"`
-	Email           string   `json:"email"`
-	DisplayName     string   `json:"displayName"`
-	DomainID        string   `json:"domainId"`
-	Roles           []string `json:"roles"`
-	ProfileImageURL string   `json:"profileImageUrl"`
+	UserID          string          `json:"userId"`
+	UserName        WOFFUserName    `json:"userName"`
+	NickName        string          `json:"nickName"`
+	Email           string          `json:"email"`
+	PrivateEmail    string          `json:"privateEmail"`
+	DomainID        FlexibleString  `json:"domainId"` // LINE WORKS returns this as a number
+	Roles           []string        `json:"roles"`
+	ProfileImageURL string          `json:"profileImageUrl"`
 }
 
 // WOFFManager manages WOFF OAuth authentication
@@ -105,9 +142,6 @@ func (m *WOFFManager) GenerateAuthorizationURL(redirectURI, state string, scopes
 	if len(scopes) == 0 {
 		scopes = m.config.Scopes
 	}
-	if len(scopes) == 0 {
-		scopes = []string{"user", "user.read"}
-	}
 
 	// Use provided redirect URI or config default
 	if redirectURI == "" {
@@ -119,7 +153,12 @@ func (m *WOFFManager) GenerateAuthorizationURL(redirectURI, state string, scopes
 	params.Add("client_id", m.config.ClientID)
 	params.Add("redirect_uri", redirectURI)
 	params.Add("response_type", "code")
-	params.Add("scope", strings.Join(scopes, " "))
+
+	// Only add scope parameter if scopes are provided
+	if len(scopes) > 0 {
+		params.Add("scope", strings.Join(scopes, " "))
+	}
+
 	params.Add("state", state)
 
 	authURL := fmt.Sprintf("%s?%s", WOFFAuthURL, params.Encode())
@@ -212,7 +251,9 @@ func (m *WOFFManager) GetUserInfo(ctx context.Context, accessToken string) (*WOF
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	authHeader := "Bearer " + accessToken
+	req.Header.Set("Authorization", authHeader)
+	log.Printf("Calling WOFF UserInfo API - URL: %s, Auth header length: %d", WOFFUserInfoURL, len(authHeader))
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
@@ -228,6 +269,8 @@ func (m *WOFFManager) GetUserInfo(ctx context.Context, accessToken string) (*WOF
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: status %d, body: %s", ErrWOFFAPIError, resp.StatusCode, string(body))
 	}
+
+	log.Printf("UserInfo API response body: %s", string(body))
 
 	var userInfo WOFFUserInfo
 	if err := json.Unmarshal(body, &userInfo); err != nil {

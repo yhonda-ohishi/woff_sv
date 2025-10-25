@@ -34,8 +34,11 @@ func (t *CloudflaredTunnel) Start(ctx context.Context) (string, error) {
 	tunnelCtx, cancel := context.WithCancel(ctx)
 	t.cancel = cancel
 
-	// Start cloudflared tunnel
-	t.cmd = exec.CommandContext(tunnelCtx, "cloudflared", "tunnel", "--url", fmt.Sprintf("http://localhost:%d", t.port))
+	// Start cloudflared tunnel with HTTP/2 protocol (instead of QUIC)
+	// This helps with firewall/network issues where UDP might be blocked
+	t.cmd = exec.CommandContext(tunnelCtx, "cloudflared", "tunnel",
+		"--url", fmt.Sprintf("http://localhost:%d", t.port),
+		"--protocol", "http2")
 
 	// Get stdout and stderr pipes
 	stdout, err := t.cmd.StdoutPipe()

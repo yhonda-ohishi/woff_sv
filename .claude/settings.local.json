@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(go build:*)"
+      "Bash(go build:*)",
+      "Bash(export PATH=\"/c/ProgramData/mingw64/mingw64/bin:$PATH\")",
+      "Bash(CGO_ENABLED=1 go run:*)"
     ],
     "deny": [],
     "ask": []
