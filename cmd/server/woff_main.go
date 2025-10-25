@@ -125,6 +125,33 @@ func (s *connectAuthServer) ListUsers(ctx context.Context, req *connect.Request[
 	return connect.NewResponse(resp), nil
 }
 
+func (s *connectAuthServer) UpdateUserRoles(ctx context.Context, req *connect.Request[authv1.UpdateUserRolesRequest]) (*connect.Response[authv1.UpdateUserRolesResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/UpdateUserRoles")
+	resp, err := s.grpcServer.UpdateUserRoles(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) DeleteUser(ctx context.Context, req *connect.Request[authv1.DeleteUserRequest]) (*connect.Response[authv1.DeleteUserResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/DeleteUser")
+	resp, err := s.grpcServer.DeleteUser(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) RestoreUser(ctx context.Context, req *connect.Request[authv1.RestoreUserRequest]) (*connect.Response[authv1.RestoreUserResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/RestoreUser")
+	resp, err := s.grpcServer.RestoreUser(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
 func (s *woffAuthServer) GetAuthorizationURL(ctx context.Context, req *authv1.GetAuthorizationURLRequest) (*authv1.GetAuthorizationURLResponse, error) {
 	log.Printf("GetAuthorizationURL request: redirect_uri=%s, state=%s, scopes=%v", req.RedirectUri, req.State, req.Scopes)
 
@@ -369,6 +396,100 @@ func (s *woffAuthServer) ListUsers(ctx context.Context, req *authv1.ListUsersReq
 		TotalCount: int32(totalCount),
 		Page:       page,
 		PageSize:   pageSize,
+	}, nil
+}
+
+// UpdateUserRoles updates the roles for a specific user (requires admin role)
+func (s *woffAuthServer) UpdateUserRoles(ctx context.Context, req *authv1.UpdateUserRolesRequest) (*authv1.UpdateUserRolesResponse, error) {
+	log.Printf("UpdateUserRoles request: user_id=%s, roles=%v", req.UserId, req.Roles)
+
+	// Check if database is available
+	if s.woffStore == nil {
+		return nil, status.Error(codes.Unavailable, "database not available")
+	}
+
+	// Validate user ID
+	if req.UserId == "" {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+
+	// Validate roles
+	if len(req.Roles) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "at least one role is required")
+	}
+
+	// Update user roles
+	if err := s.woffStore.SetRoles(req.UserId, req.Roles); err != nil {
+		log.Printf("Failed to update user roles: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to update roles: %v", err)
+	}
+
+	log.Printf("✅ Successfully updated roles for user %s: %v", req.UserId, req.Roles)
+
+	return &authv1.UpdateUserRolesResponse{
+		Success: true,
+		Message: "User roles updated successfully",
+		Roles:   req.Roles,
+	}, nil
+}
+
+// DeleteUser soft deletes a user (requires admin role)
+func (s *woffAuthServer) DeleteUser(ctx context.Context, req *authv1.DeleteUserRequest) (*authv1.DeleteUserResponse, error) {
+	log.Printf("DeleteUser request: user_id=%s", req.UserId)
+
+	// Check if database is available
+	if s.woffStore == nil {
+		return nil, status.Error(codes.Unavailable, "database not available")
+	}
+
+	// Validate user ID
+	if req.UserId == "" {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+
+	// Delete user (soft delete)
+	if err := s.woffStore.DeleteUser(req.UserId); err != nil {
+		log.Printf("Failed to delete user: %v", err)
+		// Check if error is about last admin
+		if err.Error() == "cannot delete the last admin user" {
+			return nil, status.Error(codes.FailedPrecondition, "cannot delete the last admin user")
+		}
+		return nil, status.Errorf(codes.Internal, "failed to delete user: %v", err)
+	}
+
+	log.Printf("✅ Successfully deleted user %s", req.UserId)
+
+	return &authv1.DeleteUserResponse{
+		Success: true,
+		Message: "User deleted successfully",
+	}, nil
+}
+
+// RestoreUser restores a soft-deleted user (requires admin role)
+func (s *woffAuthServer) RestoreUser(ctx context.Context, req *authv1.RestoreUserRequest) (*authv1.RestoreUserResponse, error) {
+	log.Printf("RestoreUser request: user_id=%s", req.UserId)
+
+	// Check if database is available
+	if s.woffStore == nil {
+		return nil, status.Error(codes.Unavailable, "database not available")
+	}
+
+	// Validate user ID
+	if req.UserId == "" {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+
+	// Restore user
+	if err := s.woffStore.RestoreUser(req.UserId); err != nil {
+		log.Printf("Failed to restore user: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to restore user: %v", err)
+	}
+
+	log.Printf("✅ Successfully restored user %s", req.UserId)
+
+	return &authv1.RestoreUserResponse{
+		Success: true,
+		Message: "User restored successfully",
 	}, nil
 }
 

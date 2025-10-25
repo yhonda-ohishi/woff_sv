@@ -23,6 +23,15 @@ service AuthService {
 
   // ListUsers returns a list of all registered users (requires authentication)
   rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+
+  // UpdateUserRoles updates roles for a user (requires admin role)
+  rpc UpdateUserRoles(UpdateUserRolesRequest) returns (UpdateUserRolesResponse);
+
+  // DeleteUser soft deletes a user (requires admin role)
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+
+  // RestoreUser restores a soft-deleted user (requires admin role)
+  rpc RestoreUser(RestoreUserRequest) returns (RestoreUserResponse);
 }
 
 // Request to get WOFF OAuth authorization URL
@@ -118,4 +127,33 @@ message ListUsersResponse {
   int32 total_count = 2;
   int32 page = 3;
   int32 page_size = 4;
+}
+
+message UpdateUserRolesRequest {
+  string user_id = 1;
+  repeated string roles = 2; // New roles to set for the user
+}
+
+message UpdateUserRolesResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string roles = 3; // Updated roles
+}
+
+message DeleteUserRequest {
+  string user_id = 1;
+}
+
+message DeleteUserResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RestoreUserRequest {
+  string user_id = 1;
+}
+
+message RestoreUserResponse {
+  bool success = 1;
+  string message = 2;
 }
