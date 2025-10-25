@@ -10,6 +10,7 @@ import (
 
 	authv1 "github.com/example/jwt-grpc-server/gen/auth/v1"
 	"github.com/example/jwt-grpc-server/internal/auth"
+	"github.com/example/jwt-grpc-server/internal/database"
 	"github.com/example/jwt-grpc-server/internal/interceptor"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -24,11 +25,13 @@ const (
 type woffAuthServer struct {
 	authv1.UnimplementedAuthServiceServer
 	woffManager *auth.WOFFManager
+	woffStore   *database.WOFFStore
 }
 
-func newWOFFAuthServer(woffManager *auth.WOFFManager) *woffAuthServer {
+func newWOFFAuthServer(woffManager *auth.WOFFManager, woffStore *database.WOFFStore) *woffAuthServer {
 	return &woffAuthServer{
 		woffManager: woffManager,
+		woffStore:   woffStore,
 	}
 }
 
@@ -65,6 +68,29 @@ func (s *woffAuthServer) ExchangeCode(ctx context.Context, req *authv1.ExchangeC
 	if err != nil {
 		log.Printf("Failed to exchange code: %v", err)
 		return nil, status.Errorf(codes.Internal, "failed to exchange code: %v", err)
+	}
+
+	// Get user info with the access token
+	userInfo, err := s.woffManager.GetUserInfo(ctx, tokenResp.AccessToken)
+	if err != nil {
+		log.Printf("Failed to get user info: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to get user info: %v", err)
+	}
+
+	// Save user to database
+	dbUser := &database.WOFFUser{
+		UserID:       userInfo.UserID,
+		UserName:     userInfo.UserName,
+		DisplayName:  userInfo.DisplayName,
+		RefreshToken: tokenResp.RefreshToken,
+		Roles:        userInfo.Roles,
+	}
+
+	if err := s.woffStore.SaveUser(dbUser); err != nil {
+		log.Printf("Failed to save user to database: %v", err)
+		// Don't fail the request, just log the error
+	} else {
+		log.Printf("User saved to database: %s", userInfo.UserID)
 	}
 
 	log.Printf("Successfully exchanged code for tokens")
@@ -146,6 +172,7 @@ func main() {
 	clientID := os.Getenv("WOFF_CLIENT_ID")
 	clientSecret := os.Getenv("WOFF_CLIENT_SECRET")
 	redirectURI := os.Getenv("WOFF_REDIRECT_URI")
+	dbPath := os.Getenv("DATABASE_PATH")
 
 	if clientID == "" || clientSecret == "" {
 		log.Fatal("WOFF_CLIENT_ID and WOFF_CLIENT_SECRET must be set")
@@ -155,6 +182,26 @@ func main() {
 		redirectURI = "http://localhost:8080/callback"
 		log.Printf("WOFF_REDIRECT_URI not set, using default: %s", redirectURI)
 	}
+
+	if dbPath == "" {
+		dbPath = "woff.db"
+		log.Printf("DATABASE_PATH not set, using default: %s", dbPath)
+	}
+
+	// Initialize database
+	db, err := database.NewDB(dbPath)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer db.Close()
+
+	// Run migrations
+	if err := db.Migrate(); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Create WOFF store
+	woffStore := database.NewWOFFStore(db)
 
 	// Create WOFF manager
 	woffConfig := &auth.WOFFConfig{
@@ -183,7 +230,7 @@ func main() {
 	)
 
 	// Register auth service
-	authService := newWOFFAuthServer(woffManager)
+	authService := newWOFFAuthServer(woffManager, woffStore)
 	authv1.RegisterAuthServiceServer(grpcServer, authService)
 
 	// Register reflection service for grpcurl
