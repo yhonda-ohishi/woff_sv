@@ -53,14 +53,16 @@ func corsMiddleware(next http.Handler) http.Handler {
 type woffAuthServer struct {
 	authv1.UnimplementedAuthServiceServer
 	woffManager    *auth.WOFFManager
+	lineManager    *auth.LINEManager
 	woffStore      *database.WOFFStore
 	responseCache  sync.Map // codeをキーにしてレスポンスをキャッシュ
 	processingCode sync.Map // 処理中のcodeを追跡
 }
 
-func newWOFFAuthServer(woffManager *auth.WOFFManager, woffStore *database.WOFFStore) *woffAuthServer {
+func newWOFFAuthServer(woffManager *auth.WOFFManager, lineManager *auth.LINEManager, woffStore *database.WOFFStore) *woffAuthServer {
 	return &woffAuthServer{
 		woffManager: woffManager,
+		lineManager: lineManager,
 		woffStore:   woffStore,
 	}
 }
@@ -153,18 +155,35 @@ func (s *connectAuthServer) RestoreUser(ctx context.Context, req *connect.Reques
 }
 
 func (s *woffAuthServer) GetAuthorizationURL(ctx context.Context, req *authv1.GetAuthorizationURLRequest) (*authv1.GetAuthorizationURLResponse, error) {
-	log.Printf("GetAuthorizationURL request: redirect_uri=%s, state=%s, scopes=%v", req.RedirectUri, req.State, req.Scopes)
+	// プロバイダーの設定（デフォルトはwoff）
+	provider := req.Provider
+	if provider == "" {
+		provider = "woff"
+	}
 
-	// WOFF (LINE WORKS) では ID Token発行に "openid" スコープが必須
-	// フロントエンドから送信されたスコープを無視して、サーバー設定のデフォルトスコープを使用
-	// Use server's configured default scopes (openid) instead of frontend scopes
-	authURL, state, err := s.woffManager.GenerateAuthorizationURL(req.RedirectUri, req.State, nil)
+	log.Printf("GetAuthorizationURL request: provider=%s, redirect_uri=%s, state=%s, scopes=%v", provider, req.RedirectUri, req.State, req.Scopes)
+
+	var authURL, state string
+	var err error
+
+	switch provider {
+	case "line":
+		// LINE Login
+		authURL, state, err = s.lineManager.GenerateAuthorizationURL(req.RedirectUri, req.State, req.Scopes)
+	case "woff":
+		// WOFF (LINE WORKS) では ID Token発行に "openid" スコープが必須
+		// フロントエンドから送信されたスコープを無視して、サーバー設定のデフォルトスコープを使用
+		authURL, state, err = s.woffManager.GenerateAuthorizationURL(req.RedirectUri, req.State, nil)
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "unsupported provider: %s", provider)
+	}
+
 	if err != nil {
 		log.Printf("Failed to generate authorization URL: %v", err)
 		return nil, status.Errorf(codes.Internal, "failed to generate authorization URL: %v", err)
 	}
 
-	log.Printf("Generated authorization URL: %s", authURL)
+	log.Printf("Generated %s authorization URL: %s", provider, authURL)
 	log.Printf("Generated authorization URL with state: %s", state)
 
 	return &authv1.GetAuthorizationURLResponse{
@@ -204,9 +223,19 @@ func (s *woffAuthServer) ExchangeCode(ctx context.Context, req *authv1.ExchangeC
 	}
 	defer s.processingCode.Delete(req.Code)
 
-	// Verify state for CSRF protection
+	// Verify state for CSRF protection (プロバイダー別)
 	if req.State != "" {
-		if !s.woffManager.VerifyState(req.State) {
+		var stateValid bool
+		switch provider {
+		case "line":
+			stateValid = s.lineManager.VerifyState(req.State)
+		case "woff":
+			stateValid = s.woffManager.VerifyState(req.State)
+		default:
+			return nil, status.Errorf(codes.InvalidArgument, "unsupported provider: %s", provider)
+		}
+
+		if !stateValid {
 			log.Printf("⚠️ Invalid state parameter (既に使用済みの可能性)")
 			// state検証失敗でも、キャッシュがあれば返す
 			if cachedResp, ok := s.responseCache.Load(req.Code); ok {
@@ -217,63 +246,21 @@ func (s *woffAuthServer) ExchangeCode(ctx context.Context, req *authv1.ExchangeC
 		}
 	}
 
-	// Exchange code for tokens
-	tokenResp, err := s.woffManager.ExchangeCode(ctx, req.Code, req.RedirectUri)
+	// プロバイダー別にトークン交換とユーザー情報取得
+	var response *authv1.ExchangeCodeResponse
+	var err error
+
+	switch provider {
+	case "line":
+		response, err = s.handleLINELogin(ctx, req, provider)
+	case "woff":
+		response, err = s.handleWOFFLogin(ctx, req, provider)
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "unsupported provider: %s", provider)
+	}
+
 	if err != nil {
-		log.Printf("Failed to exchange code: %v", err)
-		return nil, status.Errorf(codes.Internal, "failed to exchange code: %v", err)
-	}
-
-	log.Printf("Token exchange successful - TokenType: %s, ExpiresIn: %d, Scope: %s, AccessToken length: %d, IDToken length: %d",
-		tokenResp.TokenType, tokenResp.ExpiresIn, tokenResp.Scope, len(tokenResp.AccessToken), len(tokenResp.IDToken))
-
-	// Get user info with the access token
-	userInfo, err := s.woffManager.GetUserInfo(ctx, tokenResp.AccessToken)
-	if err != nil {
-		log.Printf("Failed to get user info: %v", err)
-		return nil, status.Errorf(codes.Internal, "failed to get user info: %v", err)
-	}
-
-	// Save user to database (if available)
-	if s.woffStore != nil {
-		dbUser := &database.WOFFUser{
-			UserID:       userInfo.UserID,
-			Provider:     provider,
-			UserName:     userInfo.UserName.FullName(),
-			DisplayName:  userInfo.NickName,
-			RefreshToken: tokenResp.RefreshToken,
-			Roles:        userInfo.Roles,
-		}
-
-		if err := s.woffStore.SaveUser(dbUser); err != nil {
-			log.Printf("Failed to save user to database: %v", err)
-			// Don't fail the request, just log the error
-		} else {
-			log.Printf("User saved to database: %s", userInfo.UserID)
-		}
-	}
-
-	log.Printf("Successfully exchanged code for tokens")
-
-	scopes := []string{}
-	if tokenResp.Scope != "" {
-		scopes = strings.Split(tokenResp.Scope, " ")
-	}
-
-	response := &authv1.ExchangeCodeResponse{
-		AccessToken:     tokenResp.AccessToken,
-		RefreshToken:    tokenResp.RefreshToken,
-		ExpiresIn:       tokenResp.ExpiresIn,
-		TokenType:       tokenResp.TokenType,
-		Scope:           scopes,
-		UserId:          userInfo.UserID,
-		Provider:        provider,
-		UserName:        userInfo.UserName.FullName(),
-		Email:           userInfo.Email,
-		DisplayName:     userInfo.NickName,
-		DomainId:        string(userInfo.DomainID),
-		Roles:           userInfo.Roles,
-		ProfileImageUrl: userInfo.ProfileImageURL,
+		return nil, err
 	}
 
 	// レスポンスをキャッシュ（5分間保持）
@@ -287,6 +274,125 @@ func (s *woffAuthServer) ExchangeCode(ctx context.Context, req *authv1.ExchangeC
 	log.Printf("ExchangeCode レスポンス返送: ユーザーID=%s, 名前=%s, メール=%s", response.UserId, response.UserName, response.Email)
 
 	return response, nil
+}
+
+// handleWOFFLogin handles WOFF (LINE WORKS) login
+func (s *woffAuthServer) handleWOFFLogin(ctx context.Context, req *authv1.ExchangeCodeRequest, provider string) (*authv1.ExchangeCodeResponse, error) {
+	// Exchange code for tokens
+	tokenResp, err := s.woffManager.ExchangeCode(ctx, req.Code, req.RedirectUri)
+	if err != nil {
+		log.Printf("Failed to exchange code: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to exchange code: %v", err)
+	}
+
+	log.Printf("Token exchange successful - TokenType: %s, ExpiresIn: %d, Scope: %s", tokenResp.TokenType, tokenResp.ExpiresIn, tokenResp.Scope)
+
+	// Get user info with the access token
+	userInfo, err := s.woffManager.GetUserInfo(ctx, tokenResp.AccessToken)
+	if err != nil {
+		log.Printf("Failed to get user info: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to get user info: %v", err)
+	}
+
+	// Save user to database
+	if s.woffStore != nil {
+		dbUser := &database.WOFFUser{
+			UserID:       userInfo.UserID,
+			Provider:     provider,
+			UserName:     userInfo.UserName.FullName(),
+			DisplayName:  userInfo.NickName,
+			RefreshToken: tokenResp.RefreshToken,
+			Roles:        userInfo.Roles,
+		}
+
+		if err := s.woffStore.SaveUser(dbUser); err != nil {
+			log.Printf("Failed to save user to database: %v", err)
+		} else {
+			log.Printf("User saved to database: %s", userInfo.UserID)
+		}
+	}
+
+	scopes := []string{}
+	if tokenResp.Scope != "" {
+		scopes = strings.Split(tokenResp.Scope, " ")
+	}
+
+	return &authv1.ExchangeCodeResponse{
+		AccessToken:     tokenResp.AccessToken,
+		RefreshToken:    tokenResp.RefreshToken,
+		ExpiresIn:       tokenResp.ExpiresIn,
+		TokenType:       tokenResp.TokenType,
+		Scope:           scopes,
+		UserId:          userInfo.UserID,
+		Provider:        provider,
+		UserName:        userInfo.UserName.FullName(),
+		Email:           userInfo.Email,
+		DisplayName:     userInfo.NickName,
+		DomainId:        string(userInfo.DomainID),
+		Roles:           userInfo.Roles,
+		ProfileImageUrl: userInfo.ProfileImageURL,
+	}, nil
+}
+
+// handleLINELogin handles LINE Login
+func (s *woffAuthServer) handleLINELogin(ctx context.Context, req *authv1.ExchangeCodeRequest, provider string) (*authv1.ExchangeCodeResponse, error) {
+	// Exchange code for tokens
+	tokenResp, err := s.lineManager.ExchangeCode(ctx, req.Code, req.RedirectUri)
+	if err != nil {
+		log.Printf("Failed to exchange code: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to exchange code: %v", err)
+	}
+
+	log.Printf("LINE token exchange successful - TokenType: %s, ExpiresIn: %d, Scope: %s", tokenResp.TokenType, tokenResp.ExpiresIn, tokenResp.Scope)
+
+	// Get user info with the access token
+	userInfo, err := s.lineManager.GetUserInfo(ctx, tokenResp.AccessToken)
+	if err != nil {
+		log.Printf("Failed to get LINE user info: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to get user info: %v", err)
+	}
+
+	// LINEユーザーにはデフォルトで"user"ロールを付与
+	roles := []string{"user"}
+
+	// Save user to database
+	if s.woffStore != nil {
+		dbUser := &database.WOFFUser{
+			UserID:       userInfo.UserID,
+			Provider:     provider,
+			UserName:     userInfo.DisplayName,
+			DisplayName:  userInfo.DisplayName,
+			RefreshToken: tokenResp.RefreshToken,
+			Roles:        roles,
+		}
+
+		if err := s.woffStore.SaveUser(dbUser); err != nil {
+			log.Printf("Failed to save user to database: %v", err)
+		} else {
+			log.Printf("LINE user saved to database: %s", userInfo.UserID)
+		}
+	}
+
+	scopes := []string{}
+	if tokenResp.Scope != "" {
+		scopes = strings.Split(tokenResp.Scope, " ")
+	}
+
+	return &authv1.ExchangeCodeResponse{
+		AccessToken:     tokenResp.AccessToken,
+		RefreshToken:    tokenResp.RefreshToken,
+		ExpiresIn:       tokenResp.ExpiresIn,
+		TokenType:       tokenResp.TokenType,
+		Scope:           scopes,
+		UserId:          userInfo.UserID,
+		Provider:        provider,
+		UserName:        userInfo.DisplayName,
+		Email:           userInfo.Email,
+		DisplayName:     userInfo.DisplayName,
+		DomainId:        "", // LINEにはdomain_idがない
+		Roles:           roles,
+		ProfileImageUrl: userInfo.PictureURL,
+	}, nil
 }
 
 func (s *woffAuthServer) GetProfile(ctx context.Context, req *authv1.GetProfileRequest) (*authv1.GetProfileResponse, error) {
@@ -561,6 +667,31 @@ func main() {
 	}
 	woffManager := auth.NewWOFFManager(woffConfig)
 
+	// Create LINE manager
+	lineClientID := os.Getenv("LINE_CLIENT_ID")
+	lineClientSecret := os.Getenv("LINE_CLIENT_SECRET")
+	lineRedirectURI := os.Getenv("LINE_REDIRECT_URI")
+
+	// LINEの設定がない場合はデフォルト値を使用（オプショナル）
+	if lineClientID == "" {
+		lineClientID = "dummy_line_client_id"
+		log.Println("⚠️  LINE_CLIENT_ID not set, LINE Login will not work")
+	}
+	if lineClientSecret == "" {
+		lineClientSecret = "dummy_line_client_secret"
+	}
+	if lineRedirectURI == "" {
+		lineRedirectURI = "http://localhost:8080/callback"
+	}
+
+	lineConfig := &auth.LINEConfig{
+		ClientID:     lineClientID,
+		ClientSecret: lineClientSecret,
+		RedirectURI:  lineRedirectURI,
+		Scopes:       []string{"profile", "openid", "email"},
+	}
+	lineManager := auth.NewLINEManager(lineConfig)
+
 	// Public methods that don't require authentication
 	publicMethods := []string{
 		"/auth.v1.AuthService/GetAuthorizationURL",
@@ -579,7 +710,7 @@ func main() {
 	)
 
 	// Register auth service
-	authService := newWOFFAuthServer(woffManager, woffStore)
+	authService := newWOFFAuthServer(woffManager, lineManager, woffStore)
 	authv1.RegisterAuthServiceServer(grpcServer, authService)
 
 	// Register reflection service for grpcurl
