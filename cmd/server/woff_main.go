@@ -116,6 +116,15 @@ func (s *connectAuthServer) GetProfile(ctx context.Context, req *connect.Request
 	return connect.NewResponse(resp), nil
 }
 
+func (s *connectAuthServer) ListUsers(ctx context.Context, req *connect.Request[authv1.ListUsersRequest]) (*connect.Response[authv1.ListUsersResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/ListUsers")
+	resp, err := s.grpcServer.ListUsers(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
 func (s *woffAuthServer) GetAuthorizationURL(ctx context.Context, req *authv1.GetAuthorizationURLRequest) (*authv1.GetAuthorizationURLResponse, error) {
 	log.Printf("GetAuthorizationURL request: redirect_uri=%s, state=%s, scopes=%v", req.RedirectUri, req.State, req.Scopes)
 
@@ -303,6 +312,63 @@ func (s *woffAuthServer) VerifyToken(ctx context.Context, req *authv1.VerifyToke
 		Valid:  true,
 		UserId: userInfo.UserID,
 		// ExpiresAt and Scopes would need to be extracted from token if available
+	}, nil
+}
+
+func (s *woffAuthServer) ListUsers(ctx context.Context, req *authv1.ListUsersRequest) (*authv1.ListUsersResponse, error) {
+	log.Printf("ListUsers request: page=%d, page_size=%d, include_deleted=%v", req.Page, req.PageSize, req.IncludeDeleted)
+
+	// デフォルト値の設定
+	page := req.Page
+	if page < 1 {
+		page = 1
+	}
+
+	pageSize := req.PageSize
+	if pageSize < 1 {
+		pageSize = 50
+	} else if pageSize > 100 {
+		pageSize = 100
+	}
+
+	// ページネーションの計算
+	offset := (page - 1) * pageSize
+
+	// ユーザー一覧を取得
+	users, err := s.woffStore.ListUsersWithDeleted(int(pageSize), int(offset), req.IncludeDeleted)
+	if err != nil {
+		log.Printf("Failed to list users: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to list users: %v", err)
+	}
+
+	// 総数を取得
+	totalCount, err := s.woffStore.CountUsers(req.IncludeDeleted)
+	if err != nil {
+		log.Printf("Failed to count users: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to count users: %v", err)
+	}
+
+	// プロトコル用のUserメッセージに変換
+	pbUsers := make([]*authv1.User, len(users))
+	for i, user := range users {
+		pbUsers[i] = &authv1.User{
+			UserId:      user.UserID,
+			UserName:    user.UserName,
+			DisplayName: user.DisplayName,
+			Roles:       user.Roles,
+			CreatedAt:   user.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:   user.UpdatedAt.Format(time.RFC3339),
+			IsDeleted:   user.DeletedAt != nil,
+		}
+	}
+
+	log.Printf("Found %d users (total: %d)", len(pbUsers), totalCount)
+
+	return &authv1.ListUsersResponse{
+		Users:      pbUsers,
+		TotalCount: int32(totalCount),
+		Page:       page,
+		PageSize:   pageSize,
 	}, nil
 }
 

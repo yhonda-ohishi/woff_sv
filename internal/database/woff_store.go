@@ -283,13 +283,28 @@ func (s *WOFFStore) RestoreUser(userID string) error {
 
 // ListUsers returns all active users (deleted_at IS NULL のみ)
 func (s *WOFFStore) ListUsers(limit, offset int) ([]*WOFFUser, error) {
-	query := `
-		SELECT user_id, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
-		FROM woff_users
-		WHERE deleted_at IS NULL
-		ORDER BY created_at DESC
-		LIMIT ? OFFSET ?
-	`
+	return s.ListUsersWithDeleted(limit, offset, false)
+}
+
+// ListUsersWithDeleted returns users with optional inclusion of deleted users
+func (s *WOFFStore) ListUsersWithDeleted(limit, offset int, includeDeleted bool) ([]*WOFFUser, error) {
+	var query string
+	if includeDeleted {
+		query = `
+			SELECT user_id, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
+			FROM woff_users
+			ORDER BY created_at DESC
+			LIMIT ? OFFSET ?
+		`
+	} else {
+		query = `
+			SELECT user_id, user_name, display_name, refresh_token, deleted_at, created_at, updated_at
+			FROM woff_users
+			WHERE deleted_at IS NULL
+			ORDER BY created_at DESC
+			LIMIT ? OFFSET ?
+		`
+	}
 
 	rows, err := s.db.conn.Query(query, limit, offset)
 	if err != nil {
@@ -328,6 +343,24 @@ func (s *WOFFStore) ListUsers(limit, offset int) ([]*WOFFUser, error) {
 	}
 
 	return users, nil
+}
+
+// CountUsers returns the total number of users
+func (s *WOFFStore) CountUsers(includeDeleted bool) (int, error) {
+	var query string
+	if includeDeleted {
+		query = "SELECT COUNT(*) FROM woff_users"
+	} else {
+		query = "SELECT COUNT(*) FROM woff_users WHERE deleted_at IS NULL"
+	}
+
+	var count int
+	err := s.db.conn.QueryRow(query).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count users: %w", err)
+	}
+
+	return count, nil
 }
 
 // getUserRoles retrieves roles for a user

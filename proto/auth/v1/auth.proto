@@ -20,6 +20,9 @@ service AuthService {
 
   // VerifyToken verifies a WOFF access token
   rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+
+  // ListUsers returns a list of all registered users (requires authentication)
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
 }
 
 // Request to get WOFF OAuth authorization URL
@@ -92,4 +95,27 @@ message VerifyTokenResponse {
   string user_id = 2;
   int64 expires_at = 3;
   repeated string scopes = 4;
+}
+
+message ListUsersRequest {
+  int32 page = 1;      // Page number (default: 1)
+  int32 page_size = 2; // Number of users per page (default: 50, max: 100)
+  bool include_deleted = 3; // Include soft-deleted users (default: false)
+}
+
+message User {
+  string user_id = 1;
+  string user_name = 2;
+  string display_name = 3;
+  repeated string roles = 4;
+  string created_at = 5;
+  string updated_at = 6;
+  bool is_deleted = 7;
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+  int32 total_count = 2;
+  int32 page = 3;
+  int32 page_size = 4;
 }
