@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package auth.v1;
+
+option go_package = "github.com/example/jwt-grpc-server/gen/auth/v1;authv1";
+
+// AuthService handles WOFF (Works Office) authentication operations
+service AuthService {
+  // GetAuthorizationURL returns the WOFF OAuth authorization URL
+  rpc GetAuthorizationURL(GetAuthorizationURLRequest) returns (GetAuthorizationURLResponse);
+
+  // ExchangeCode exchanges authorization code for access token
+  rpc ExchangeCode(ExchangeCodeRequest) returns (ExchangeCodeResponse);
+
+  // GetProfile returns the authenticated user's profile (requires WOFF access token)
+  rpc GetProfile(GetProfileRequest) returns (GetProfileResponse);
+
+  // RefreshToken refreshes an existing WOFF access token
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+
+  // VerifyToken verifies a WOFF access token
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+}
+
+// Request to get WOFF OAuth authorization URL
+message GetAuthorizationURLRequest {
+  string redirect_uri = 1;
+  string state = 2; // CSRF protection state
+  repeated string scopes = 3; // Optional scopes
+}
+
+// Response containing the authorization URL
+message GetAuthorizationURLResponse {
+  string authorization_url = 1;
+  string state = 2;
+}
+
+// Request to exchange authorization code for tokens
+message ExchangeCodeRequest {
+  string code = 1;
+  string redirect_uri = 2;
+  string state = 3; // CSRF verification
+}
+
+// Response containing WOFF access tokens
+message ExchangeCodeResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+  int64 expires_in = 3;
+  string token_type = 4;
+  repeated string scope = 5;
+}
+
+message GetProfileRequest {
+  // Empty - user info will be extracted from WOFF token in metadata
+}
+
+message GetProfileResponse {
+  string user_id = 1;
+  string user_name = 2;
+  string email = 3;
+  string display_name = 4;
+  string domain_id = 5;
+  repeated string roles = 6;
+  string profile_image_url = 7;
+}
+
+message RefreshTokenRequest {
+  string refresh_token = 1;
+}
+
+message RefreshTokenResponse {
+  string access_token = 1;
+  int64 expires_in = 2;
+  string token_type = 3;
+}
+
+message VerifyTokenRequest {
+  string access_token = 1;
+}
+
+message VerifyTokenResponse {
+  bool valid = 1;
+  string user_id = 2;
+  int64 expires_at = 3;
+  repeated string scopes = 4;
+}
