@@ -85,7 +85,32 @@ go run cmd/client/woff_main.go
 
 ## 📖 認証フロー
 
-### OAuth 2.0 Authorization Code Flow
+### 推奨: フロントエンド主導の認証フロー
+
+Cloudflare Tunnelは起動毎にURLが変わるため、フロントエンド側でWOFF認証を完結させる方式を推奨します。
+
+```
+1. フロントエンド → LINE WORKS OAuth認証画面
+   ↓
+2. ユーザー認証 → LINE WORKS
+   ↓
+3. LINE WORKS → アクセストークン発行 → フロントエンド
+   ↓
+4. フロントエンド → gRPC呼び出し (Authorizationヘッダー付き) → バックエンド
+   ↓
+5. バックエンド → トークン検証 → LINE WORKS API
+   ↓
+6. バックエンド → ユーザー情報をDBに保存/更新
+   ↓
+7. バックエンド → レスポンス返却 → フロントエンド
+```
+
+**利点:**
+- バックエンドのURLが変わっても影響なし
+- フロントエンド側で柔軟な認証フロー制御が可能
+- バックエンドはステートレスなトークン検証のみ
+
+### 従来: バックエンド主導の認証フロー（固定URLの場合）
 
 ```
 1. クライアント → GetAuthorizationURL → サーバー
@@ -104,6 +129,8 @@ go run cmd/client/woff_main.go
    ↓
 8. サーバー → ユーザー情報返却 → クライアント
 ```
+
+**注意:** この方式は固定URLが必要なため、Cloudflare Tunnel使用時は非推奨
 
 ## 🔌 API エンドポイント
 
@@ -204,7 +231,112 @@ rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
 
 ## 💻 実装例
 
-### Goクライアント
+### フロントエンド統合（推奨）
+
+#### React + TypeScript の例
+
+```typescript
+import { createPromiseClient } from "@connectrpc/connect";
+import { createConnectTransport } from "@connectrpc/connect-web";
+import { AuthService } from "@buf/yhonda_woff-auth.connectrpc_es/auth/v1/auth_connect";
+
+// 1. gRPCクライアント設定
+const transport = createConnectTransport({
+  baseUrl: "https://your-cloudflare-tunnel-url.trycloudflare.com",
+});
+
+const client = createPromiseClient(AuthService, transport);
+
+// 2. フロントエンドでWOFF認証（LINE WORKS JavaScript SDKを使用）
+// https://developers.worksmobile.com/jp/docs/auth-overview
+const loginWithWOFF = async () => {
+  // LINE WORKS OAuth認証フローを実装
+  // 例: ポップアップまたはリダイレクトで認証
+  const accessToken = await worksmobile.auth.getAccessToken({
+    client_id: "YOUR_CLIENT_ID",
+    redirect_uri: "http://localhost:3000/callback",
+    scope: "user user.read",
+  });
+
+  // LocalStorageなどに保存
+  localStorage.setItem("woff_access_token", accessToken);
+  return accessToken;
+};
+
+// 3. gRPC呼び出し時にトークンを付与
+const getProfile = async () => {
+  const accessToken = localStorage.getItem("woff_access_token");
+
+  const profile = await client.getProfile(
+    {}, // 空のリクエスト
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  console.log("User Profile:", profile);
+  return profile;
+};
+
+// 4. トークン検証
+const verifyToken = async (token: string) => {
+  const result = await client.verifyToken({ accessToken: token });
+  return result.valid;
+};
+```
+
+#### Vue.js の例
+
+```typescript
+// composables/useWOFFAuth.ts
+import { ref } from 'vue';
+import { createPromiseClient } from "@connectrpc/connect";
+import { createConnectTransport } from "@connectrpc/connect-web";
+import { AuthService } from "@buf/yhonda_woff-auth.connectrpc_es/auth/v1/auth_connect";
+
+export function useWOFFAuth() {
+  const accessToken = ref<string | null>(localStorage.getItem("woff_access_token"));
+  const user = ref(null);
+
+  const transport = createConnectTransport({
+    baseUrl: import.meta.env.VITE_GRPC_URL,
+  });
+
+  const client = createPromiseClient(AuthService, transport);
+
+  const login = async () => {
+    // LINE WORKS認証実装
+    const token = await worksmobile.auth.getAccessToken({
+      client_id: import.meta.env.VITE_WOFF_CLIENT_ID,
+      redirect_uri: window.location.origin + "/callback",
+    });
+
+    accessToken.value = token;
+    localStorage.setItem("woff_access_token", token);
+    await fetchProfile();
+  };
+
+  const fetchProfile = async () => {
+    if (!accessToken.value) return;
+
+    user.value = await client.getProfile({}, {
+      headers: { Authorization: `Bearer ${accessToken.value}` },
+    });
+  };
+
+  const logout = () => {
+    accessToken.value = null;
+    user.value = null;
+    localStorage.removeItem("woff_access_token");
+  };
+
+  return { accessToken, user, login, fetchProfile, logout };
+}
+```
+
+### Goクライアント（従来方式）
 
 ```go
 // 1. 認証URL取得
@@ -232,52 +364,7 @@ ctx = metadata.NewOutgoingContext(ctx, md)
 profile, err := client.GetProfile(ctx, &authv1.GetProfileRequest{})
 ```
 
-### TypeScript/React (Connect-Web)
-
-```typescript
-import { createPromiseClient } from "@connectrpc/connect";
-import { createConnectTransport } from "@connectrpc/connect-web";
-import { AuthService } from "@buf/your-org_woff-auth.connectrpc_es/auth/v1/auth_connect";
-
-const transport = createConnectTransport({
-  baseUrl: "http://localhost:8080",
-});
-
-const client = createPromiseClient(AuthService, transport);
-
-// 1. 認証URL取得
-const authUrlResponse = await client.getAuthorizationURL({
-  redirectUri: "http://localhost:8080/callback",
-  scopes: ["user", "user.read"],
-});
-
-// 2. ユーザーを認証URLへリダイレクト
-window.location.href = authUrlResponse.authorizationUrl;
-
-// 3. コールバックでコードを受け取り、トークンと交換
-const urlParams = new URLSearchParams(window.location.search);
-const code = urlParams.get('code');
-const state = urlParams.get('state');
-
-const tokenResponse = await client.exchangeCode({
-  code: code,
-  redirectUri: "http://localhost:8080/callback",
-  state: state,
-});
-
-// トークンを保存
-localStorage.setItem('access_token', tokenResponse.accessToken);
-
-// 4. プロファイル取得
-const profile = await client.getProfile(
-  {},
-  {
-    headers: {
-      Authorization: `Bearer ${tokenResponse.accessToken}`,
-    },
-  }
-);
-```
+**注意:** この方式はバックエンドが固定URLの場合のみ使用してください。
 
 ## 🌐 Cloudflare Tunnel（公開URL自動生成）
 
