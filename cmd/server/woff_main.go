@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,9 +21,11 @@ import (
 	"github.com/example/jwt-grpc-server/gen/auth/v1/authv1connect"
 	"github.com/example/jwt-grpc-server/internal/auth"
 	"github.com/example/jwt-grpc-server/internal/database"
+	"github.com/example/jwt-grpc-server/internal/flickr"
 	"github.com/example/jwt-grpc-server/internal/interceptor"
 	"github.com/example/jwt-grpc-server/internal/registration"
 	"github.com/example/jwt-grpc-server/internal/tunnel"
+	"github.com/mrjones/oauth"
 	dbconfig "github.com/yhonda-ohishi/db_service/src/config"
 	"github.com/yhonda-ohishi/db_service/src/models/mysql"
 	"github.com/yhonda-ohishi/db_service/src/repository"
@@ -52,6 +58,489 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// convertWebMToMP4 converts a WebM file to MP4 using FFmpeg
+func convertWebMToMP4(inputPath, outputPath string) error {
+	log.Printf("Converting WebM to MP4: %s -> %s", inputPath, outputPath)
+
+	// FFmpeg command: ffmpeg -i input.webm -c:v libx264 -c:a aac -strict experimental output.mp4
+	cmd := exec.Command("ffmpeg",
+		"-i", inputPath,
+		"-c:v", "libx264",
+		"-preset", "fast",
+		"-c:a", "aac",
+		"-strict", "experimental",
+		"-y", // Overwrite output file if exists
+		outputPath,
+	)
+
+	// Capture output for debugging
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("FFmpeg error: %v\nOutput: %s", err, string(output))
+		return fmt.Errorf("ffmpeg conversion failed: %w", err)
+	}
+
+	log.Printf("✅ Conversion successful: %s", outputPath)
+	return nil
+}
+
+// mergeAndConvertToMP4 merges separate video and audio WebM files and converts to MP4
+func mergeAndConvertToMP4(videoPath, audioPath, outputPath string) error {
+	log.Printf("Merging and converting: video=%s, audio=%s -> %s", videoPath, audioPath, outputPath)
+
+	// FFmpeg command: ffmpeg -i video.webm -i audio.webm -c:v libx264 -c:a aac -shortest output.mp4
+	cmd := exec.Command("ffmpeg",
+		"-i", videoPath, // Input video
+		"-i", audioPath, // Input audio
+		"-c:v", "libx264",
+		"-preset", "fast",
+		"-c:a", "aac",
+		"-strict", "experimental",
+		"-shortest", // Match shortest stream duration
+		"-y",        // Overwrite output file if exists
+		outputPath,
+	)
+
+	// Capture output for debugging
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("FFmpeg merge error: %v\nOutput: %s", err, string(output))
+		return fmt.Errorf("ffmpeg merge failed: %w", err)
+	}
+
+	log.Printf("✅ Merge and conversion successful: %s", outputPath)
+	return nil
+}
+
+// handleRecordingUpload handles video recording uploads
+func handleRecordingUpload(w http.ResponseWriter, r *http.Request, prodDB *dbconfig.ProdDatabase) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	log.Println("📹 Receiving recording upload...")
+
+	// Parse multipart form (max 1GB for Flickr limit)
+	if err := r.ParseMultipartForm(1024 * 1024 * 1024); err != nil {
+		log.Printf("Failed to parse multipart form: %v", err)
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	// Extract form fields
+	sessionId := r.FormValue("sessionId")
+	timestamp := r.FormValue("timestamp")
+	partNumber := r.FormValue("partNumber")
+
+	log.Printf("Session: %s, Timestamp: %s, Part: %s", sessionId, timestamp, partNumber)
+
+	// Create temp directory for processing
+	tempDir := filepath.Join(os.TempDir(), "woff_recordings")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		log.Printf("Failed to create temp directory: %v", err)
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Get video file
+	videoFile, videoHeader, err := r.FormFile("video")
+	if err != nil {
+		log.Printf("Failed to get video file: %v", err)
+		http.Error(w, "Missing video file", http.StatusBadRequest)
+		return
+	}
+	defer videoFile.Close()
+
+	log.Printf("Received video: %s, size: %d bytes", videoHeader.Filename, videoHeader.Size)
+
+	// Save video WebM file
+	videoWebmPath := filepath.Join(tempDir, fmt.Sprintf("%s_%s_part%s_video.webm", sessionId, timestamp, partNumber))
+	videoWebmFile, err := os.Create(videoWebmPath)
+	if err != nil {
+		log.Printf("Failed to create video WebM file: %v", err)
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(videoWebmPath) // Clean up temp file
+
+	if _, err := io.Copy(videoWebmFile, videoFile); err != nil {
+		videoWebmFile.Close()
+		log.Printf("Failed to save video WebM file: %v", err)
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		return
+	}
+	videoWebmFile.Close()
+
+	// Check if audio file is provided (optional)
+	audioFile, audioHeader, audioErr := r.FormFile("audio")
+	var audioWebmPath string
+	hasAudio := audioErr == nil
+
+	if hasAudio {
+		defer audioFile.Close()
+		log.Printf("Received audio: %s, size: %d bytes", audioHeader.Filename, audioHeader.Size)
+
+		// Save audio WebM file
+		audioWebmPath = filepath.Join(tempDir, fmt.Sprintf("%s_%s_part%s_audio.webm", sessionId, timestamp, partNumber))
+		audioWebmFile, err := os.Create(audioWebmPath)
+		if err != nil {
+			log.Printf("Failed to create audio WebM file: %v", err)
+			http.Error(w, "Server error", http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(audioWebmPath) // Clean up temp file
+
+		if _, err := io.Copy(audioWebmFile, audioFile); err != nil {
+			audioWebmFile.Close()
+			log.Printf("Failed to save audio WebM file: %v", err)
+			http.Error(w, "Server error", http.StatusInternalServerError)
+			return
+		}
+		audioWebmFile.Close()
+	}
+
+	// Convert to MP4 (merge audio and video if both exist)
+	mp4Path := filepath.Join(tempDir, fmt.Sprintf("%s_%s_part%s.mp4", sessionId, timestamp, partNumber))
+
+	if hasAudio {
+		// Merge video and audio then convert to MP4
+		log.Printf("🎬 Merging video and audio streams...")
+		if err := mergeAndConvertToMP4(videoWebmPath, audioWebmPath, mp4Path); err != nil {
+			log.Printf("Failed to merge and convert: %v", err)
+			http.Error(w, "Conversion failed", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Convert video-only WebM to MP4
+		log.Printf("🎬 Converting video-only WebM to MP4...")
+		if err := convertWebMToMP4(videoWebmPath, mp4Path); err != nil {
+			log.Printf("Failed to convert to MP4: %v", err)
+			http.Error(w, "Conversion failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	defer os.Remove(mp4Path) // Clean up temp file
+
+	log.Printf("✅ Successfully converted to MP4: %s", mp4Path)
+
+	// Upload MP4 to Flickr
+	flickrAPIKey := os.Getenv("FLICKR_API_KEY")
+	flickrAPISecret := os.Getenv("FLICKR_API_SECRET")
+
+	if flickrAPIKey == "" || flickrAPISecret == "" {
+		log.Println("⚠️  FLICKR_API_KEY or FLICKR_API_SECRET not set, skipping Flickr upload")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"success": true, "message": "Recording converted (Flickr upload skipped)", "recordingId": "%s_part%s"}`, sessionId, partNumber)
+		return
+	}
+
+	// Load tokens from file
+	tokens, err := loadFlickrTokens()
+	if err != nil {
+		log.Printf("⚠️  Failed to load Flickr tokens: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"success": true, "message": "Recording converted (Flickr OAuth error)", "recordingId": "%s_part%s", "authUrl": "http://localhost:50051/api/flickr/auth"}`, sessionId, partNumber)
+		return
+	}
+
+	if tokens == nil || tokens.AccessToken == "" || tokens.AccessSecret == "" {
+		log.Println("⚠️  Flickr tokens not found")
+		log.Println("💡 Visit http://localhost:50051/api/flickr/auth to get OAuth tokens")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"success": true, "message": "Recording converted (Flickr OAuth required)", "recordingId": "%s_part%s", "authUrl": "http://localhost:50051/api/flickr/auth"}`, sessionId, partNumber)
+		return
+	}
+
+	log.Printf("✅ Loaded Flickr tokens from %s", flickrTokensFile)
+	flickrClient := flickr.NewClientWithToken(flickrAPIKey, flickrAPISecret, tokens.AccessToken, tokens.AccessSecret)
+
+	title := fmt.Sprintf("Recording %s - Part %s", sessionId, partNumber)
+	description := fmt.Sprintf("Video call recording from session %s, part %s, timestamp %s", sessionId, partNumber, timestamp)
+
+	log.Printf("📤 Uploading to Flickr: %s", title)
+	photoID, err := flickrClient.UploadVideo(mp4Path, title, description, false)
+	if err != nil {
+		log.Printf("Failed to upload to Flickr: %v", err)
+		http.Error(w, "Flickr upload failed", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("✅ Successfully uploaded to Flickr with photo ID: %s", photoID)
+
+	// TODO: Save metadata to database
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	fmt.Fprintf(w, `{"success": true, "message": "Recording uploaded successfully", "recordingId": "%s_part%s", "flickrPhotoId": "%s"}`, sessionId, partNumber, photoID)
+}
+
+// Global variable to store OAuth tokens temporarily
+var flickrTokenStore = struct {
+	sync.RWMutex
+	requestToken       string
+	requestTokenSecret string
+	accessToken        string
+	accessTokenSecret  string
+}{}
+
+const flickrTokensFile = "flickr_tokens.json"
+
+type FlickrTokens struct {
+	AccessToken  string `json:"access_token"`
+	AccessSecret string `json:"access_secret"`
+}
+
+// saveFlickrTokens saves OAuth tokens to file
+func saveFlickrTokens(accessToken, accessSecret string) error {
+	tokens := FlickrTokens{
+		AccessToken:  accessToken,
+		AccessSecret: accessSecret,
+	}
+
+	data, err := json.MarshalIndent(tokens, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal tokens: %w", err)
+	}
+
+	err = os.WriteFile(flickrTokensFile, data, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to write tokens file: %w", err)
+	}
+
+	return nil
+}
+
+// loadFlickrTokens loads OAuth tokens from file
+func loadFlickrTokens() (*FlickrTokens, error) {
+	data, err := os.ReadFile(flickrTokensFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // File doesn't exist, not an error
+		}
+		return nil, fmt.Errorf("failed to read tokens file: %w", err)
+	}
+
+	var tokens FlickrTokens
+	err = json.Unmarshal(data, &tokens)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tokens: %w", err)
+	}
+
+	return &tokens, nil
+}
+
+// handleFlickrAuth initiates Flickr OAuth flow
+func handleFlickrAuth(w http.ResponseWriter, r *http.Request) {
+	apiKey := os.Getenv("FLICKR_API_KEY")
+	apiSecret := os.Getenv("FLICKR_API_SECRET")
+
+	if apiKey == "" || apiSecret == "" {
+		http.Error(w, "Flickr API credentials not set", http.StatusInternalServerError)
+		return
+	}
+
+	consumer := oauth.NewConsumer(
+		apiKey,
+		apiSecret,
+		oauth.ServiceProvider{
+			RequestTokenUrl:   "https://www.flickr.com/services/oauth/request_token",
+			AuthorizeTokenUrl: "https://www.flickr.com/services/oauth/authorize",
+			AccessTokenUrl:    "https://www.flickr.com/services/oauth/access_token",
+		},
+	)
+
+	// Request OAuth token
+	callbackURL := "http://localhost:50051/api/flickr/callback"
+	requestTok, url, err := consumer.GetRequestTokenAndUrl(callbackURL)
+	if err != nil {
+		log.Printf("Failed to get request token: %v", err)
+		http.Error(w, "Failed to get request token", http.StatusInternalServerError)
+		return
+	}
+
+	// Add write permission to authorization URL (required for upload)
+	url = url + "&perms=write"
+
+	// Store request token
+	flickrTokenStore.Lock()
+	flickrTokenStore.requestToken = requestTok.Token
+	flickrTokenStore.requestTokenSecret = requestTok.Secret
+	flickrTokenStore.Unlock()
+
+	log.Printf("🔑 Flickr authorization URL: %s", url)
+
+	// Redirect to Flickr authorization page
+	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+}
+
+// handleFlickrCallback handles OAuth callback from Flickr
+func handleFlickrCallback(w http.ResponseWriter, r *http.Request) {
+	apiKey := os.Getenv("FLICKR_API_KEY")
+	apiSecret := os.Getenv("FLICKR_API_SECRET")
+
+	oauthToken := r.URL.Query().Get("oauth_token")
+	oauthVerifier := r.URL.Query().Get("oauth_verifier")
+
+	if oauthToken == "" || oauthVerifier == "" {
+		http.Error(w, "Missing oauth parameters", http.StatusBadRequest)
+		return
+	}
+
+	consumer := oauth.NewConsumer(
+		apiKey,
+		apiSecret,
+		oauth.ServiceProvider{
+			RequestTokenUrl:   "https://www.flickr.com/services/oauth/request_token",
+			AuthorizeTokenUrl: "https://www.flickr.com/services/oauth/authorize",
+			AccessTokenUrl:    "https://www.flickr.com/services/oauth/access_token",
+		},
+	)
+
+	// Get stored request token
+	flickrTokenStore.RLock()
+	requestToken := flickrTokenStore.requestToken
+	requestTokenSecret := flickrTokenStore.requestTokenSecret
+	flickrTokenStore.RUnlock()
+
+	if requestToken != oauthToken {
+		http.Error(w, "OAuth token mismatch", http.StatusBadRequest)
+		return
+	}
+
+	// Exchange for access token
+	accessTok, err := consumer.AuthorizeToken(&oauth.RequestToken{
+		Token:  requestToken,
+		Secret: requestTokenSecret,
+	}, oauthVerifier)
+	if err != nil {
+		log.Printf("Failed to get access token: %v", err)
+		http.Error(w, "Failed to get access token", http.StatusInternalServerError)
+		return
+	}
+
+	// Store access token in memory
+	flickrTokenStore.Lock()
+	flickrTokenStore.accessToken = accessTok.Token
+	flickrTokenStore.accessTokenSecret = accessTok.Secret
+	flickrTokenStore.Unlock()
+
+	// Save to file
+	err = saveFlickrTokens(accessTok.Token, accessTok.Secret)
+	if err != nil {
+		log.Printf("⚠️  Failed to save tokens to file: %v", err)
+	} else {
+		log.Printf("✅ Flickr tokens saved to %s", flickrTokensFile)
+	}
+
+	log.Printf("✅ Flickr access token obtained successfully")
+	log.Printf("Access Token: %s", accessTok.Token)
+	log.Printf("Access Secret: %s", accessTok.Secret)
+
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, `
+		<html>
+		<body>
+			<h2>Flickr Authentication Successful!</h2>
+			<p>Tokens have been automatically saved to <code>%s</code></p>
+			<p>Access Token: <code>%s</code></p>
+			<p>Access Secret: <code>%s</code></p>
+			<p>You can now close this window and upload videos!</p>
+		</body>
+		</html>
+	`, flickrTokensFile, accessTok.Token, accessTok.Secret)
+}
+
+// handleFlickrGetToken returns current OAuth tokens (for testing)
+func handleFlickrGetToken(w http.ResponseWriter, r *http.Request) {
+	flickrTokenStore.RLock()
+	defer flickrTokenStore.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"accessToken": "%s", "accessSecret": "%s"}`,
+		flickrTokenStore.accessToken, flickrTokenStore.accessTokenSecret)
+}
+
+// handleTestFlickrUpload tests Flickr upload with a simple file
+func handleTestFlickrUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Load Flickr tokens from file
+	tokens, err := loadFlickrTokens()
+	if err != nil {
+		log.Printf("Failed to load Flickr tokens: %v", err)
+		http.Error(w, "Failed to load tokens", http.StatusInternalServerError)
+		return
+	}
+
+	if tokens == nil || tokens.AccessToken == "" || tokens.AccessSecret == "" {
+		log.Println("⚠️  Flickr tokens not found")
+		http.Error(w, "Flickr tokens not configured. Please visit /api/flickr/auth first", http.StatusUnauthorized)
+		return
+	}
+
+	// Parse multipart form
+	err = r.ParseMultipartForm(10 << 20) // 10 MB
+	if err != nil {
+		log.Printf("Failed to parse form: %v", err)
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	// Get uploaded file
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		log.Printf("Failed to get file: %v", err)
+		http.Error(w, "Failed to get file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Get form values
+	title := r.FormValue("title")
+	description := r.FormValue("description")
+
+	// Save file to temp location
+	tempFile, err := os.CreateTemp("", "flickr-test-*.jpg")
+	if err != nil {
+		log.Printf("Failed to create temp file: %v", err)
+		http.Error(w, "Failed to create temp file", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+
+	_, err = io.Copy(tempFile, file)
+	if err != nil {
+		log.Printf("Failed to copy file: %v", err)
+		http.Error(w, "Failed to copy file", http.StatusInternalServerError)
+		return
+	}
+
+	// Upload to Flickr
+	flickrAPIKey := os.Getenv("FLICKR_API_KEY")
+	flickrAPISecret := os.Getenv("FLICKR_API_SECRET")
+	flickrClient := flickr.NewClientWithToken(flickrAPIKey, flickrAPISecret, tokens.AccessToken, tokens.AccessSecret)
+
+	log.Printf("🧪 Testing Flickr upload: %s", title)
+	photoID, err := flickrClient.UploadVideo(tempFile.Name(), title, description, false)
+	if err != nil {
+		log.Printf("❌ Upload failed: %v", err)
+		http.Error(w, fmt.Sprintf("Upload failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("✅ Upload successful! Photo ID: %s", photoID)
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"success": true, "photoId": "%s"}`, photoID)
 }
 
 type woffAuthServer struct {
@@ -1564,6 +2053,19 @@ func main() {
 		connectService,
 		connect.WithInterceptors(connect.UnaryInterceptorFunc(connectInterceptor)),
 	)
+
+	// Add recording upload endpoint
+	mux.HandleFunc("/api/recordings/upload", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleRecordingUpload(w, r, prodDB)
+	})).ServeHTTP)
+
+	// Add Flickr OAuth endpoints
+	mux.HandleFunc("/api/flickr/auth", handleFlickrAuth)
+	mux.HandleFunc("/api/flickr/callback", handleFlickrCallback)
+	mux.HandleFunc("/api/flickr/token", handleFlickrGetToken)
+
+	// Add Flickr test upload endpoint
+	mux.HandleFunc("/api/test-flickr-upload", handleTestFlickrUpload)
 
 	// Add CORS middleware
 	// Use "/" to match all paths and let the handler's internal routing handle the path matching
