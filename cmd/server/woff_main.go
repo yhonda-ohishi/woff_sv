@@ -1359,7 +1359,12 @@ func main() {
 	dbPath := os.Getenv("DATABASE_PATH")
 
 	if clientID == "" || clientSecret == "" {
-		log.Fatal("WOFF_CLIENT_ID and WOFF_CLIENT_SECRET must be set")
+		log.Println("⚠️  WOFF_CLIENT_ID and WOFF_CLIENT_SECRET not set")
+		log.Println("⚠️  WOFF authentication will not work")
+		log.Println("💡 Tip: Set WOFF_CLIENT_ID and WOFF_CLIENT_SECRET in .env file")
+		// Set dummy values to allow server to start
+		clientID = "dummy_client_id"
+		clientSecret = "dummy_client_secret"
 	}
 
 	if redirectURI == "" {
