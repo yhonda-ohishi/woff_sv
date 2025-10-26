@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // BackendRegistration handles registering the backend URL with the frontend
@@ -123,4 +125,83 @@ func (r *BackendRegistration) RegisterWithRetry(backendURL string, maxRetries in
 	}
 
 	return fmt.Errorf("registration failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+// MaintainConnection maintains a WebSocket connection to the frontend
+// and automatically reconnects on failure
+func (r *BackendRegistration) MaintainConnection(backendURL string) {
+	log.Printf("🔌 Starting WebSocket connection maintenance")
+
+	for {
+		err := r.connectWebSocket(backendURL)
+		if err != nil {
+			log.Printf("⚠️  WebSocket connection lost: %v", err)
+			log.Printf("🔄 Reconnecting in 5 seconds...")
+			time.Sleep(5 * time.Second)
+
+			// Re-register before reconnecting
+			if regErr := r.RegisterWithRetry(backendURL, 3); regErr != nil {
+				log.Printf("❌ Re-registration failed: %v", regErr)
+			}
+		}
+	}
+}
+
+// connectWebSocket establishes a WebSocket connection to /wait-for-backend
+func (r *BackendRegistration) connectWebSocket(backendURL string) error {
+	// Convert https:// to wss:// for WebSocket
+	wsURL := r.frontendURL
+	if len(wsURL) > 8 && wsURL[:8] == "https://" {
+		wsURL = "wss://" + wsURL[8:]
+	} else if len(wsURL) > 7 && wsURL[:7] == "http://" {
+		wsURL = "ws://" + wsURL[7:]
+	}
+	wsURL = wsURL + "/wait-for-backend"
+	log.Printf("🔌 Connecting to WebSocket: %s", wsURL)
+
+	// Create WebSocket connection
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+r.secret)
+	header.Set("X-Backend-URL", backendURL)
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		if resp != nil {
+			return fmt.Errorf("websocket dial failed (status %d): %w", resp.StatusCode, err)
+		}
+		return fmt.Errorf("websocket dial failed: %w", err)
+	}
+	defer conn.Close()
+
+	log.Printf("✅ WebSocket connected successfully")
+
+	// Set ping/pong handlers for keep-alive
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	// Send periodic pings
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Read messages (mainly for connection monitoring)
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("websocket read error: %w", err)
+		}
+
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		log.Printf("📨 WebSocket message received: %s", string(message))
+	}
 }

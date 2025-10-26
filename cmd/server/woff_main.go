@@ -1596,9 +1596,14 @@ func main() {
 			if frontendURL != "" && frontendSecret != "" {
 				registrar := registration.NewBackendRegistration(frontendURL, frontendSecret)
 				go func() {
+					// Initial registration with retry
 					if err := registrar.RegisterWithRetry(publicURL, 3); err != nil {
-						log.Printf("❌ Failed to register backend with frontend: %v", err)
+						log.Printf("❌ Failed initial registration with frontend: %v", err)
+						log.Printf("🔄 Will continue retrying via WebSocket connection...")
 					}
+
+					// Maintain WebSocket connection for real-time updates and auto-reconnect
+					registrar.MaintainConnection(publicURL)
 				}()
 			} else {
 				if frontendURL == "" {
