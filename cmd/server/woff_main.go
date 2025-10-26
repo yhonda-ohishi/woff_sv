@@ -135,8 +135,15 @@ func handleRecordingUpload(w http.ResponseWriter, r *http.Request, prodDB *dbcon
 	sessionId := r.FormValue("sessionId")
 	timestamp := r.FormValue("timestamp")
 	partNumber := r.FormValue("partNumber")
+	streamType := r.FormValue("streamType") // "local" or "remote"
 
-	log.Printf("Session: %s, Timestamp: %s, Part: %s", sessionId, timestamp, partNumber)
+	// Default to empty if not provided (for backward compatibility)
+	if streamType == "" {
+		streamType = "unknown"
+	}
+
+	log.Printf("📹 Receiving recording upload...")
+	log.Printf("Session: %s, Timestamp: %s, Part: %s, Type: %s", sessionId, timestamp, partNumber, streamType)
 
 	// Create temp directory for processing
 	tempDir := filepath.Join(os.TempDir(), "woff_recordings")
@@ -158,7 +165,7 @@ func handleRecordingUpload(w http.ResponseWriter, r *http.Request, prodDB *dbcon
 	log.Printf("Received video: %s, size: %d bytes", videoHeader.Filename, videoHeader.Size)
 
 	// Save video WebM file
-	videoWebmPath := filepath.Join(tempDir, fmt.Sprintf("%s_%s_part%s_video.webm", sessionId, timestamp, partNumber))
+	videoWebmPath := filepath.Join(tempDir, fmt.Sprintf("%s_%s_%s_part%s_video.webm", sessionId, streamType, timestamp, partNumber))
 	videoWebmFile, err := os.Create(videoWebmPath)
 	if err != nil {
 		log.Printf("Failed to create video WebM file: %v", err)
@@ -185,7 +192,7 @@ func handleRecordingUpload(w http.ResponseWriter, r *http.Request, prodDB *dbcon
 		log.Printf("Received audio: %s, size: %d bytes", audioHeader.Filename, audioHeader.Size)
 
 		// Save audio WebM file
-		audioWebmPath = filepath.Join(tempDir, fmt.Sprintf("%s_%s_part%s_audio.webm", sessionId, timestamp, partNumber))
+		audioWebmPath = filepath.Join(tempDir, fmt.Sprintf("%s_%s_%s_part%s_audio.webm", sessionId, streamType, timestamp, partNumber))
 		audioWebmFile, err := os.Create(audioWebmPath)
 		if err != nil {
 			log.Printf("Failed to create audio WebM file: %v", err)
@@ -204,7 +211,7 @@ func handleRecordingUpload(w http.ResponseWriter, r *http.Request, prodDB *dbcon
 	}
 
 	// Convert to MP4 (merge audio and video if both exist)
-	mp4Path := filepath.Join(tempDir, fmt.Sprintf("%s_%s_part%s.mp4", sessionId, timestamp, partNumber))
+	mp4Path := filepath.Join(tempDir, fmt.Sprintf("%s_%s_%s_part%s.mp4", sessionId, streamType, timestamp, partNumber))
 
 	if hasAudio {
 		// Merge video and audio then convert to MP4
@@ -235,7 +242,7 @@ func handleRecordingUpload(w http.ResponseWriter, r *http.Request, prodDB *dbcon
 		log.Println("⚠️  FLICKR_API_KEY or FLICKR_API_SECRET not set, skipping Flickr upload")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, `{"success": true, "message": "Recording converted (Flickr upload skipped)", "recordingId": "%s_part%s"}`, sessionId, partNumber)
+		fmt.Fprintf(w, `{"success": true, "message": "Recording converted (Flickr upload skipped)", "recordingId": "%s_%s_part%s"}`, sessionId, streamType, partNumber)
 		return
 	}
 
@@ -245,7 +252,7 @@ func handleRecordingUpload(w http.ResponseWriter, r *http.Request, prodDB *dbcon
 		log.Printf("⚠️  Failed to load Flickr tokens: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, `{"success": true, "message": "Recording converted (Flickr OAuth error)", "recordingId": "%s_part%s", "authUrl": "http://localhost:50051/api/flickr/auth"}`, sessionId, partNumber)
+		fmt.Fprintf(w, `{"success": true, "message": "Recording converted (Flickr OAuth error)", "recordingId": "%s_%s_part%s", "authUrl": "http://localhost:50051/api/flickr/auth"}`, sessionId, streamType, partNumber)
 		return
 	}
 
@@ -254,15 +261,15 @@ func handleRecordingUpload(w http.ResponseWriter, r *http.Request, prodDB *dbcon
 		log.Println("💡 Visit http://localhost:50051/api/flickr/auth to get OAuth tokens")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, `{"success": true, "message": "Recording converted (Flickr OAuth required)", "recordingId": "%s_part%s", "authUrl": "http://localhost:50051/api/flickr/auth"}`, sessionId, partNumber)
+		fmt.Fprintf(w, `{"success": true, "message": "Recording converted (Flickr OAuth required)", "recordingId": "%s_%s_part%s", "authUrl": "http://localhost:50051/api/flickr/auth"}`, sessionId, streamType, partNumber)
 		return
 	}
 
 	log.Printf("✅ Loaded Flickr tokens from %s", flickrTokensFile)
 	flickrClient := flickr.NewClientWithToken(flickrAPIKey, flickrAPISecret, tokens.AccessToken, tokens.AccessSecret)
 
-	title := fmt.Sprintf("Recording %s - Part %s", sessionId, partNumber)
-	description := fmt.Sprintf("Video call recording from session %s, part %s, timestamp %s", sessionId, partNumber, timestamp)
+	title := fmt.Sprintf("Recording %s (%s) - Part %s", sessionId, streamType, partNumber)
+	description := fmt.Sprintf("Video call recording (%s stream) from session %s, part %s, timestamp %s", streamType, sessionId, partNumber, timestamp)
 
 	log.Printf("📤 Uploading to Flickr: %s", title)
 	photoID, err := flickrClient.UploadVideo(mp4Path, title, description, false)
@@ -278,7 +285,7 @@ func handleRecordingUpload(w http.ResponseWriter, r *http.Request, prodDB *dbcon
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	fmt.Fprintf(w, `{"success": true, "message": "Recording uploaded successfully", "recordingId": "%s_part%s", "flickrPhotoId": "%s"}`, sessionId, partNumber, photoID)
+	fmt.Fprintf(w, `{"success": true, "message": "Recording uploaded successfully", "recordingId": "%s_%s_part%s", "flickrPhotoId": "%s"}`, sessionId, streamType, partNumber, photoID)
 }
 
 // Global variable to store OAuth tokens temporarily
