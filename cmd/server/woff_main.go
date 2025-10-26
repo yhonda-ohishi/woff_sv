@@ -20,6 +20,9 @@ import (
 	"github.com/example/jwt-grpc-server/internal/interceptor"
 	"github.com/example/jwt-grpc-server/internal/registration"
 	"github.com/example/jwt-grpc-server/internal/tunnel"
+	dbconfig "github.com/yhonda-ohishi/db_service/src/config"
+	"github.com/yhonda-ohishi/db_service/src/models/mysql"
+	"github.com/yhonda-ohishi/db_service/src/repository"
 	"github.com/joho/godotenv"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -27,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+	"gorm.io/gorm"
 )
 
 const (
@@ -52,18 +56,42 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 type woffAuthServer struct {
 	authv1.UnimplementedAuthServiceServer
-	woffManager    *auth.WOFFManager
-	lineManager    *auth.LINEManager
-	woffStore      *database.WOFFStore
-	responseCache  sync.Map // codeをキーにしてレスポンスをキャッシュ
-	processingCode sync.Map // 処理中のcodeを追跡
+	woffManager       *auth.WOFFManager
+	lineManager       *auth.LINEManager
+	woffStore         *database.WOFFStore
+	responseCache     sync.Map // codeをキーにしてレスポンスをキャッシュ
+	processingCode    sync.Map // 処理中のcodeを追跡
+	prodDB            *dbconfig.ProdDatabase
+	devDB             *gorm.DB
+	timeCardProdRepo  repository.TimeCardRepository
+	timeCardDevRepo   repository.TimeCardDevRepository
 }
 
-func newWOFFAuthServer(woffManager *auth.WOFFManager, lineManager *auth.LINEManager, woffStore *database.WOFFStore) *woffAuthServer {
+func newWOFFAuthServer(
+	woffManager *auth.WOFFManager,
+	lineManager *auth.LINEManager,
+	woffStore *database.WOFFStore,
+	prodDB *dbconfig.ProdDatabase,
+	devDB *gorm.DB,
+) *woffAuthServer {
+	var timeCardProdRepo repository.TimeCardRepository
+	var timeCardDevRepo repository.TimeCardDevRepository
+
+	if prodDB != nil {
+		timeCardProdRepo = repository.NewTimeCardRepository(prodDB)
+	}
+	if devDB != nil {
+		timeCardDevRepo = repository.NewTimeCardDevRepository(devDB)
+	}
+
 	return &woffAuthServer{
-		woffManager: woffManager,
-		lineManager: lineManager,
-		woffStore:   woffStore,
+		woffManager:      woffManager,
+		lineManager:      lineManager,
+		woffStore:        woffStore,
+		prodDB:           prodDB,
+		devDB:            devDB,
+		timeCardProdRepo: timeCardProdRepo,
+		timeCardDevRepo:  timeCardDevRepo,
 	}
 }
 
@@ -154,6 +182,51 @@ func (s *connectAuthServer) RestoreUser(ctx context.Context, req *connect.Reques
 	return connect.NewResponse(resp), nil
 }
 
+func (s *connectAuthServer) GetTimeCard(ctx context.Context, req *connect.Request[authv1.GetTimeCardRequest]) (*connect.Response[authv1.TimeCardResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/GetTimeCard")
+	resp, err := s.grpcServer.GetTimeCard(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) ListTimeCards(ctx context.Context, req *connect.Request[authv1.ListTimeCardsRequest]) (*connect.Response[authv1.ListTimeCardsResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/ListTimeCards")
+	resp, err := s.grpcServer.ListTimeCards(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) CreateTimeCard(ctx context.Context, req *connect.Request[authv1.CreateTimeCardRequest]) (*connect.Response[authv1.TimeCardResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/CreateTimeCard")
+	resp, err := s.grpcServer.CreateTimeCard(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) UpdateTimeCard(ctx context.Context, req *connect.Request[authv1.UpdateTimeCardRequest]) (*connect.Response[authv1.TimeCardResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/UpdateTimeCard")
+	resp, err := s.grpcServer.UpdateTimeCard(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) DeleteTimeCard(ctx context.Context, req *connect.Request[authv1.DeleteTimeCardRequest]) (*connect.Response[authv1.DeleteTimeCardResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/DeleteTimeCard")
+	resp, err := s.grpcServer.DeleteTimeCard(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
 func (s *woffAuthServer) GetAuthorizationURL(ctx context.Context, req *authv1.GetAuthorizationURLRequest) (*authv1.GetAuthorizationURLResponse, error) {
 	// プロバイダーの設定（デフォルトはwoff）
 	provider := req.Provider
@@ -236,13 +309,14 @@ func (s *woffAuthServer) ExchangeCode(ctx context.Context, req *authv1.ExchangeC
 		}
 
 		if !stateValid {
-			log.Printf("⚠️ Invalid state parameter (既に使用済みの可能性)")
+			log.Printf("⚠️ Invalid state parameter (フロントエンドが独自に生成した可能性、またはstate store に存在しない)")
 			// state検証失敗でも、キャッシュがあれば返す
 			if cachedResp, ok := s.responseCache.Load(req.Code); ok {
 				log.Printf("✅ state検証失敗だがキャッシュを返します: code=%s...", req.Code[:10])
 				return cachedResp.(*authv1.ExchangeCodeResponse), nil
 			}
-			return nil, status.Errorf(codes.InvalidArgument, "invalid state parameter")
+			// LINEの場合、フロントエンドが独自にstateを管理することが多いため、警告のみで続行
+			log.Printf("⚠️ state検証失敗ですが、処理を続行します (provider=%s)", provider)
 		}
 	}
 
@@ -352,10 +426,9 @@ func (s *woffAuthServer) handleLINELogin(ctx context.Context, req *authv1.Exchan
 		return nil, status.Errorf(codes.Internal, "failed to get user info: %v", err)
 	}
 
-	// LINEユーザーにはデフォルトで"user"ロールを付与
-	roles := []string{"user"}
-
 	// Save user to database
+	// Rolesは空で渡すことで、SaveUser内で自動的に判定される（最初のユーザーはadmin）
+	var roles []string
 	if s.woffStore != nil {
 		dbUser := &database.WOFFUser{
 			UserID:       userInfo.UserID,
@@ -363,14 +436,26 @@ func (s *woffAuthServer) handleLINELogin(ctx context.Context, req *authv1.Exchan
 			UserName:     userInfo.DisplayName,
 			DisplayName:  userInfo.DisplayName,
 			RefreshToken: tokenResp.RefreshToken,
-			Roles:        roles,
+			Roles:        nil, // 空にすることでSaveUser内で自動判定
 		}
 
 		if err := s.woffStore.SaveUser(dbUser); err != nil {
 			log.Printf("Failed to save user to database: %v", err)
+			// エラー時はデフォルトロールを設定
+			roles = []string{"user"}
 		} else {
 			log.Printf("LINE user saved to database: %s", userInfo.UserID)
+			// データベースから保存されたユーザーを取得してロールを確認
+			savedUser, err := s.woffStore.GetUser(userInfo.UserID)
+			if err == nil && savedUser != nil {
+				roles = savedUser.Roles
+			} else {
+				roles = []string{"user"}
+			}
 		}
+	} else {
+		// データベースが無い場合はデフォルトロール
+		roles = []string{"user"}
 	}
 
 	scopes := []string{}
@@ -524,6 +609,36 @@ func (s *woffAuthServer) UpdateUserRoles(ctx context.Context, req *authv1.Update
 		return nil, status.Error(codes.Unavailable, "database not available")
 	}
 
+	// Get authenticated user from context
+	authenticatedUserID, ok := ctx.Value("user_id").(string)
+	if !ok || authenticatedUserID == "" {
+		return nil, status.Error(codes.Unauthenticated, "authentication required")
+	}
+
+	// Get authenticated user's information
+	authenticatedUser, err := s.woffStore.GetUser(authenticatedUserID)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "invalid user")
+	}
+
+	// Check if authenticated user has admin role
+	hasAdmin := false
+	for _, role := range authenticatedUser.Roles {
+		if role == "admin" {
+			hasAdmin = true
+			break
+		}
+	}
+
+	if !hasAdmin {
+		return nil, status.Error(codes.PermissionDenied, "only admin users can update roles")
+	}
+
+	// Prevent users from modifying their own roles
+	if authenticatedUserID == req.UserId {
+		return nil, status.Error(codes.PermissionDenied, "cannot modify your own roles")
+	}
+
 	// Validate user ID
 	if req.UserId == "" {
 		return nil, status.Error(codes.InvalidArgument, "user_id is required")
@@ -609,6 +724,273 @@ func (s *woffAuthServer) RestoreUser(ctx context.Context, req *authv1.RestoreUse
 	}, nil
 }
 
+// GetTimeCard retrieves a timecard by composite key
+func (s *woffAuthServer) GetTimeCard(ctx context.Context, req *authv1.GetTimeCardRequest) (*authv1.TimeCardResponse, error) {
+	log.Printf("GetTimeCard request: environment=%v, datetime=%s, id=%d", req.Environment, req.Datetime, req.Id)
+
+	// Parse datetime
+	parsedTime, err := time.Parse(time.RFC3339, req.Datetime)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid datetime format: %v", err)
+	}
+
+	var timeCard *mysql.TimeCard
+
+	// Select repository based on environment
+	switch req.Environment {
+	case authv1.DBEnvironment_DB_ENVIRONMENT_DEV:
+		if s.timeCardDevRepo == nil {
+			return nil, status.Error(codes.Unavailable, "dev database not available")
+		}
+		timeCard, err = s.timeCardDevRepo.GetByCompositeKey(parsedTime, int(req.Id))
+	case authv1.DBEnvironment_DB_ENVIRONMENT_PROD, authv1.DBEnvironment_DB_ENVIRONMENT_UNSPECIFIED:
+		if s.timeCardProdRepo == nil {
+			return nil, status.Error(codes.Unavailable, "prod database not available")
+		}
+		timeCard, err = s.timeCardProdRepo.GetByCompositeKey(parsedTime, int(req.Id))
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "invalid environment: %v", req.Environment)
+	}
+
+	if err != nil {
+		log.Printf("Failed to get timecard: %v", err)
+		return nil, status.Errorf(codes.NotFound, "timecard not found: %v", err)
+	}
+
+	// Convert to proto message
+	stateDetail := ""
+	if timeCard.StateDetail != nil {
+		stateDetail = *timeCard.StateDetail
+	}
+
+	return &authv1.TimeCardResponse{
+		Timecard: &authv1.TimeCard{
+			Datetime:    timeCard.Datetime.Format(time.RFC3339),
+			Id:          int32(timeCard.ID),
+			MachineIp:   timeCard.MachineIP,
+			State:       timeCard.State,
+			StateDetail: stateDetail,
+			Created:     timeCard.Created.Format(time.RFC3339),
+			Modified:    timeCard.Modified.Format(time.RFC3339),
+		},
+	}, nil
+}
+
+// ListTimeCards retrieves a list of timecards
+func (s *woffAuthServer) ListTimeCards(ctx context.Context, req *authv1.ListTimeCardsRequest) (*authv1.ListTimeCardsResponse, error) {
+	log.Printf("ListTimeCards request: environment=%v, limit=%d, offset=%d, order_by=%s", req.Environment, req.Limit, req.Offset, req.OrderBy)
+
+	// Set defaults
+	limit := int(req.Limit)
+	if limit == 0 {
+		limit = 50
+	} else if limit > 100 {
+		limit = 100
+	}
+
+	offset := int(req.Offset)
+	orderBy := req.OrderBy
+	if orderBy == "" {
+		orderBy = "datetime DESC"
+	}
+
+	var timeCards []*mysql.TimeCard
+	var totalCount int64
+	var err error
+
+	// Select repository based on environment
+	switch req.Environment {
+	case authv1.DBEnvironment_DB_ENVIRONMENT_DEV:
+		if s.timeCardDevRepo == nil {
+			return nil, status.Error(codes.Unavailable, "dev database not available")
+		}
+		timeCards, totalCount, err = s.timeCardDevRepo.GetAll(limit, offset, orderBy)
+	case authv1.DBEnvironment_DB_ENVIRONMENT_PROD, authv1.DBEnvironment_DB_ENVIRONMENT_UNSPECIFIED:
+		if s.timeCardProdRepo == nil {
+			return nil, status.Error(codes.Unavailable, "prod database not available")
+		}
+		timeCards, totalCount, err = s.timeCardProdRepo.GetAll(limit, offset, orderBy)
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "invalid environment: %v", req.Environment)
+	}
+
+	if err != nil {
+		log.Printf("Failed to list timecards: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to list timecards: %v", err)
+	}
+
+	// Convert to proto messages
+	protoTimeCards := make([]*authv1.TimeCard, 0, len(timeCards))
+	for _, tc := range timeCards {
+		stateDetail := ""
+		if tc.StateDetail != nil {
+			stateDetail = *tc.StateDetail
+		}
+
+		protoTimeCards = append(protoTimeCards, &authv1.TimeCard{
+			Datetime:    tc.Datetime.Format(time.RFC3339),
+			Id:          int32(tc.ID),
+			MachineIp:   tc.MachineIP,
+			State:       tc.State,
+			StateDetail: stateDetail,
+			Created:     tc.Created.Format(time.RFC3339),
+			Modified:    tc.Modified.Format(time.RFC3339),
+		})
+	}
+
+	return &authv1.ListTimeCardsResponse{
+		Timecards:  protoTimeCards,
+		TotalCount: totalCount,
+	}, nil
+}
+
+// CreateTimeCard creates a new timecard (dev environment only)
+func (s *woffAuthServer) CreateTimeCard(ctx context.Context, req *authv1.CreateTimeCardRequest) (*authv1.TimeCardResponse, error) {
+	log.Printf("CreateTimeCard request: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	// Only allow in dev repository
+	if s.timeCardDevRepo == nil {
+		return nil, status.Error(codes.Unavailable, "dev database not available")
+	}
+
+	// Parse datetime
+	parsedTime, err := time.Parse(time.RFC3339, req.Datetime)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid datetime format: %v", err)
+	}
+
+	// Create timecard model
+	now := time.Now()
+	var stateDetail *string
+	if req.StateDetail != "" {
+		stateDetail = &req.StateDetail
+	}
+
+	timeCard := &mysql.TimeCard{
+		Datetime:    parsedTime,
+		ID:          int(req.Id),
+		MachineIP:   req.MachineIp,
+		State:       req.State,
+		StateDetail: stateDetail,
+		Created:     now,
+		Modified:    now,
+	}
+
+	// Create in database
+	if err := s.timeCardDevRepo.Create(timeCard); err != nil {
+		log.Printf("Failed to create timecard: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to create timecard: %v", err)
+	}
+
+	log.Printf("✅ Successfully created timecard: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	// Return created timecard
+	resultStateDetail := ""
+	if timeCard.StateDetail != nil {
+		resultStateDetail = *timeCard.StateDetail
+	}
+
+	return &authv1.TimeCardResponse{
+		Timecard: &authv1.TimeCard{
+			Datetime:    timeCard.Datetime.Format(time.RFC3339),
+			Id:          int32(timeCard.ID),
+			MachineIp:   timeCard.MachineIP,
+			State:       timeCard.State,
+			StateDetail: resultStateDetail,
+			Created:     timeCard.Created.Format(time.RFC3339),
+			Modified:    timeCard.Modified.Format(time.RFC3339),
+		},
+	}, nil
+}
+
+// UpdateTimeCard updates an existing timecard (dev environment only)
+func (s *woffAuthServer) UpdateTimeCard(ctx context.Context, req *authv1.UpdateTimeCardRequest) (*authv1.TimeCardResponse, error) {
+	log.Printf("UpdateTimeCard request: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	// Only allow in dev repository
+	if s.timeCardDevRepo == nil {
+		return nil, status.Error(codes.Unavailable, "dev database not available")
+	}
+
+	// Parse datetime
+	parsedTime, err := time.Parse(time.RFC3339, req.Datetime)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid datetime format: %v", err)
+	}
+
+	// Get existing timecard
+	existingCard, err := s.timeCardDevRepo.GetByCompositeKey(parsedTime, int(req.Id))
+	if err != nil {
+		log.Printf("Failed to find timecard: %v", err)
+		return nil, status.Errorf(codes.NotFound, "timecard not found: %v", err)
+	}
+
+	// Update fields
+	existingCard.MachineIP = req.MachineIp
+	existingCard.State = req.State
+	if req.StateDetail != "" {
+		existingCard.StateDetail = &req.StateDetail
+	} else {
+		existingCard.StateDetail = nil
+	}
+	existingCard.Modified = time.Now()
+
+	// Update in database
+	if err := s.timeCardDevRepo.Update(existingCard); err != nil {
+		log.Printf("Failed to update timecard: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to update timecard: %v", err)
+	}
+
+	log.Printf("✅ Successfully updated timecard: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	// Return updated timecard
+	resultStateDetail := ""
+	if existingCard.StateDetail != nil {
+		resultStateDetail = *existingCard.StateDetail
+	}
+
+	return &authv1.TimeCardResponse{
+		Timecard: &authv1.TimeCard{
+			Datetime:    existingCard.Datetime.Format(time.RFC3339),
+			Id:          int32(existingCard.ID),
+			MachineIp:   existingCard.MachineIP,
+			State:       existingCard.State,
+			StateDetail: resultStateDetail,
+			Created:     existingCard.Created.Format(time.RFC3339),
+			Modified:    existingCard.Modified.Format(time.RFC3339),
+		},
+	}, nil
+}
+
+// DeleteTimeCard deletes a timecard (dev environment only)
+func (s *woffAuthServer) DeleteTimeCard(ctx context.Context, req *authv1.DeleteTimeCardRequest) (*authv1.DeleteTimeCardResponse, error) {
+	log.Printf("DeleteTimeCard request: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	// Only allow in dev repository
+	if s.timeCardDevRepo == nil {
+		return nil, status.Error(codes.Unavailable, "dev database not available")
+	}
+
+	// Parse datetime
+	parsedTime, err := time.Parse(time.RFC3339, req.Datetime)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid datetime format: %v", err)
+	}
+
+	// Delete from database
+	if err := s.timeCardDevRepo.Delete(parsedTime, int(req.Id)); err != nil {
+		log.Printf("Failed to delete timecard: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to delete timecard: %v", err)
+	}
+
+	log.Printf("✅ Successfully deleted timecard: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	return &authv1.DeleteTimeCardResponse{
+		Success: true,
+		Message: "Timecard deleted successfully",
+	}, nil
+}
+
 func main() {
 	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
@@ -668,29 +1050,57 @@ func main() {
 	woffManager := auth.NewWOFFManager(woffConfig)
 
 	// Create LINE manager
-	lineClientID := os.Getenv("LINE_CLIENT_ID")
-	lineClientSecret := os.Getenv("LINE_CLIENT_SECRET")
+	lineChannelID := os.Getenv("LINE_CHANNEL_ID")
+	lineChannelSecret := os.Getenv("LINE_CHANNEL_SECRET")
 	lineRedirectURI := os.Getenv("LINE_REDIRECT_URI")
 
 	// LINEの設定がない場合はデフォルト値を使用（オプショナル）
-	if lineClientID == "" {
-		lineClientID = "dummy_line_client_id"
-		log.Println("⚠️  LINE_CLIENT_ID not set, LINE Login will not work")
+	if lineChannelID == "" {
+		lineChannelID = "dummy_line_channel_id"
+		log.Println("⚠️  LINE_CHANNEL_ID not set, LINE Login will not work")
 	}
-	if lineClientSecret == "" {
-		lineClientSecret = "dummy_line_client_secret"
+	if lineChannelSecret == "" {
+		lineChannelSecret = "dummy_line_channel_secret"
 	}
 	if lineRedirectURI == "" {
 		lineRedirectURI = "http://localhost:8080/callback"
 	}
 
 	lineConfig := &auth.LINEConfig{
-		ClientID:     lineClientID,
-		ClientSecret: lineClientSecret,
+		ClientID:     lineChannelID,
+		ClientSecret: lineChannelSecret,
 		RedirectURI:  lineRedirectURI,
 		Scopes:       []string{"profile", "openid", "email"},
 	}
 	lineManager := auth.NewLINEManager(lineConfig)
+
+	// Initialize Production Database (optional, read-only)
+	var prodDB *dbconfig.ProdDatabase
+	prodDB, err = dbconfig.NewProdDatabase()
+	if err != nil {
+		log.Printf("⚠️  Production database connection failed: %v", err)
+		log.Println("⚠️  TimeCard endpoints with PROD environment will not work")
+	} else {
+		log.Println("✅ Production database connected successfully")
+		defer prodDB.Close()
+	}
+
+	// Initialize Development Database (optional, read-write)
+	var devDB *gorm.DB
+	devConfig, err := dbconfig.LoadConfig()
+	if err != nil {
+		log.Printf("⚠️  Development database config load failed: %v", err)
+		log.Println("⚠️  TimeCard endpoints with DEV environment will not work")
+	} else {
+		devDB, err = dbconfig.InitDatabase(devConfig)
+		if err != nil {
+			log.Printf("⚠️  Development database connection failed: %v", err)
+			log.Println("⚠️  TimeCard endpoints with DEV environment will not work")
+		} else {
+			log.Println("✅ Development database connected successfully")
+			defer dbconfig.CloseDatabase(devDB)
+		}
+	}
 
 	// Public methods that don't require authentication
 	publicMethods := []string{
@@ -710,7 +1120,7 @@ func main() {
 	)
 
 	// Register auth service
-	authService := newWOFFAuthServer(woffManager, lineManager, woffStore)
+	authService := newWOFFAuthServer(woffManager, lineManager, woffStore, prodDB, devDB)
 	authv1.RegisterAuthServiceServer(grpcServer, authService)
 
 	// Register reflection service for grpcurl
