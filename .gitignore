@@ -38,3 +38,15 @@ go.work
 *.db
 *.db-shm
 *.db-wal
+
+# Flickr OAuth tokens (sensitive)
+flickr_tokens.json
+
+# Temporary files
+*.jpg
+*.png
+*.mp4
+*.webm
+
+# Claude settings
+.claude/settings.local.json
