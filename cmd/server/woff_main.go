@@ -1532,13 +1532,14 @@ func main() {
 	connectService := newConnectAuthServer(authService)
 
 	// Register Connect service with CORS support
-	path, handler := authv1connect.NewAuthServiceHandler(
+	_, handler := authv1connect.NewAuthServiceHandler(
 		connectService,
 		connect.WithInterceptors(connect.UnaryInterceptorFunc(connectInterceptor)),
 	)
 
 	// Add CORS middleware
-	mux.Handle(path, corsMiddleware(handler))
+	// Use "/" to match all paths and let the handler's internal routing handle the path matching
+	mux.Handle("/", corsMiddleware(handler))
 
 	// Create HTTP server that supports both HTTP/1.1 and HTTP/2
 	httpServer := &http.Server{
