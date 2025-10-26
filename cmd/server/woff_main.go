@@ -1433,6 +1433,7 @@ func main() {
 	if err != nil {
 		log.Printf("⚠️  Production database connection failed: %v", err)
 		log.Println("⚠️  TimeCard endpoints with PROD environment will not work")
+		prodDB = nil // Ensure it's nil on failure
 	} else {
 		log.Println("✅ Production database connected successfully")
 		defer prodDB.Close()
@@ -1444,11 +1445,13 @@ func main() {
 	if err != nil {
 		log.Printf("⚠️  Development database config load failed: %v", err)
 		log.Println("⚠️  TimeCard endpoints with DEV environment will not work")
+		devDB = nil // Ensure it's nil on failure
 	} else {
 		devDB, err = dbconfig.InitDatabase(devConfig)
 		if err != nil {
 			log.Printf("⚠️  Development database connection failed: %v", err)
 			log.Println("⚠️  TimeCard endpoints with DEV environment will not work")
+			devDB = nil // Ensure it's nil on failure
 		} else {
 			log.Println("✅ Development database connected successfully")
 			defer dbconfig.CloseDatabase(devDB)
