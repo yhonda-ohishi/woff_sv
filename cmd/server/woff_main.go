@@ -1102,20 +1102,55 @@ func main() {
 		}
 	}
 
-	// Public methods that don't require authentication
+	// Public methods that don't require WOFF authentication
 	publicMethods := []string{
 		"/auth.v1.AuthService/GetAuthorizationURL",
 		"/auth.v1.AuthService/ExchangeCode",
 		"/auth.v1.AuthService/RefreshToken",
 		"/auth.v1.AuthService/VerifyToken",
+		// TimeCard endpoints use FRONTEND_SECRET authentication instead
+		"/auth.v1.AuthService/GetTimeCard",
+		"/auth.v1.AuthService/ListTimeCards",
+		"/auth.v1.AuthService/CreateTimeCard",
+		"/auth.v1.AuthService/UpdateTimeCard",
+		"/auth.v1.AuthService/DeleteTimeCard",
+	}
+
+	// TimeCard endpoints that require FRONTEND_SECRET authentication
+	secretMethods := []string{
+		"/auth.v1.AuthService/GetTimeCard",
+		"/auth.v1.AuthService/ListTimeCards",
+		"/auth.v1.AuthService/CreateTimeCard",
+		"/auth.v1.AuthService/UpdateTimeCard",
+		"/auth.v1.AuthService/DeleteTimeCard",
+	}
+
+	// Get FRONTEND_SECRET for timecard authentication
+	frontendSecret := os.Getenv("FRONTEND_SECRET")
+	if frontendSecret == "" {
+		log.Println("⚠️  FRONTEND_SECRET not set, TimeCard endpoints will not work")
 	}
 
 	// Create WOFF interceptor
 	woffInterceptor := interceptor.NewWOFFInterceptor(woffManager, publicMethods)
 
-	// Create gRPC server with interceptors
+	// Create Secret interceptor for TimeCard endpoints
+	secretInterceptor := interceptor.NewSecretInterceptor(frontendSecret, secretMethods)
+
+	// Chain interceptors: first secret check, then WOFF check
+	chainedInterceptor := func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		// First check secret authentication for timecard endpoints
+		secretCtx, secretErr := secretInterceptor.Unary()(ctx, req, info, handler)
+		if secretErr == nil {
+			return secretCtx, nil
+		}
+		// If secret auth failed, try WOFF authentication
+		return woffInterceptor.Unary()(ctx, req, info, handler)
+	}
+
+	// Create gRPC server with chained interceptors
 	grpcServer := grpc.NewServer(
-		grpc.UnaryInterceptor(woffInterceptor.Unary()),
+		grpc.UnaryInterceptor(chainedInterceptor),
 		grpc.StreamInterceptor(woffInterceptor.Stream()),
 	)
 
