@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -1834,6 +1835,43 @@ func (s *woffAuthServer) DeleteTimeCardLog(ctx context.Context, req *authv1.Dele
 }
 
 func main() {
+	// Kill any existing woff_server.exe processes on Windows (except current process)
+	if runtime.GOOS == "windows" {
+		log.Println("🔍 Checking for existing woff_server processes...")
+
+		// Get current process ID
+		currentPID := os.Getpid()
+
+		// Find all woff_server.exe processes
+		cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq woff_server.exe", "/FO", "CSV", "/NH")
+		output, err := cmd.CombinedOutput()
+
+		if err == nil && len(output) > 0 {
+			lines := strings.Split(string(output), "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "woff_server.exe") {
+					// Parse PID from CSV format: "woff_server.exe","PID",...
+					fields := strings.Split(line, ",")
+					if len(fields) >= 2 {
+						pidStr := strings.Trim(fields[1], "\" ")
+						var pid int
+						fmt.Sscanf(pidStr, "%d", &pid)
+
+						// Kill only if it's not the current process
+						if pid != currentPID && pid > 0 {
+							killCmd := exec.Command("taskkill", "/F", "/PID", fmt.Sprintf("%d", pid))
+							killCmd.Run()
+							log.Printf("✅ Killed existing woff_server process (PID: %d)", pid)
+							time.Sleep(2 * time.Second) // Wait for port to be released
+						}
+					}
+				}
+			}
+		} else {
+			log.Println("ℹ️  No existing woff_server process found")
+		}
+	}
+
 	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using environment variables")
