@@ -55,6 +55,24 @@ service AuthService {
 
   // DeleteTimeCard deletes a timecard (dev environment only)
   rpc DeleteTimeCard(DeleteTimeCardRequest) returns (DeleteTimeCardResponse);
+
+  // GetTimeCardLog retrieves a timecard log by composite key (datetime + id)
+  rpc GetTimeCardLog(GetTimeCardLogRequest) returns (TimeCardLogResponse);
+
+  // ListTimeCardLogs retrieves a list of timecard logs with optional pagination
+  rpc ListTimeCardLogs(ListTimeCardLogsRequest) returns (ListTimeCardLogsResponse);
+
+  // ListTimeCardLogsByCardID retrieves timecard logs by card_id with pagination
+  rpc ListTimeCardLogsByCardID(ListTimeCardLogsByCardIDRequest) returns (ListTimeCardLogsResponse);
+
+  // CreateTimeCardLog creates a new timecard log (dev environment only)
+  rpc CreateTimeCardLog(CreateTimeCardLogRequest) returns (TimeCardLogResponse);
+
+  // UpdateTimeCardLog updates an existing timecard log (dev environment only)
+  rpc UpdateTimeCardLog(UpdateTimeCardLogRequest) returns (TimeCardLogResponse);
+
+  // DeleteTimeCardLog deletes a timecard log (dev environment only)
+  rpc DeleteTimeCardLog(DeleteTimeCardLogRequest) returns (DeleteTimeCardLogResponse);
 }
 
 // DBEnvironment specifies which database to use
@@ -256,6 +274,85 @@ message DeleteTimeCardRequest {
 
 // DeleteTimeCardResponse confirms deletion
 message DeleteTimeCardResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// TimeCardLog represents a single timecard log entry
+message TimeCardLog {
+  string datetime = 1;        // RFC3339 format timestamp
+  int32 id = 2;               // User ID
+  string card_id = 3;         // Card ID (FeliCa UID etc.)
+  string machine_ip = 4;      // Machine IP address
+  string state = 5;           // State (e.g., "in", "out")
+  string state_detail = 6;    // Optional state detail
+  string created = 7;         // RFC3339 format timestamp
+  string modified = 8;        // RFC3339 format timestamp
+}
+
+// GetTimeCardLogRequest requests a specific timecard log by composite key
+message GetTimeCardLogRequest {
+  DBEnvironment environment = 1;  // Which database to use
+  string datetime = 2;            // RFC3339 format timestamp
+  int32 id = 3;                   // User ID
+}
+
+// TimeCardLogResponse returns a single timecard log
+message TimeCardLogResponse {
+  TimeCardLog log = 1;
+}
+
+// ListTimeCardLogsRequest requests a list of timecard logs
+message ListTimeCardLogsRequest {
+  DBEnvironment environment = 1;  // Which database to use
+  int32 limit = 2;                // Number of records to return (default: 50, max: 100)
+  int32 offset = 3;               // Number of records to skip (default: 0)
+  string order_by = 4;            // Order by field (default: "datetime DESC")
+}
+
+// ListTimeCardLogsByCardIDRequest requests timecard logs by card_id
+message ListTimeCardLogsByCardIDRequest {
+  DBEnvironment environment = 1;  // Which database to use
+  string card_id = 2;             // Card ID to filter by
+  int32 limit = 3;                // Number of records to return (default: 50, max: 100)
+  int32 offset = 4;               // Number of records to skip (default: 0)
+  string order_by = 5;            // Order by field (default: "datetime DESC")
+}
+
+// ListTimeCardLogsResponse returns a list of timecard logs
+message ListTimeCardLogsResponse {
+  repeated TimeCardLog logs = 1;
+  int64 total_count = 2;          // Total number of logs
+}
+
+// CreateTimeCardLogRequest creates a new timecard log (dev only)
+message CreateTimeCardLogRequest {
+  string datetime = 1;        // RFC3339 format timestamp
+  int32 id = 2;               // User ID
+  string card_id = 3;         // Card ID (FeliCa UID etc.)
+  string machine_ip = 4;      // Machine IP address
+  string state = 5;           // State (e.g., "in", "out")
+  string state_detail = 6;    // Optional state detail
+}
+
+// UpdateTimeCardLogRequest updates an existing timecard log (dev only)
+message UpdateTimeCardLogRequest {
+  string datetime = 1;        // RFC3339 format timestamp (part of composite key)
+  int32 id = 2;               // User ID (part of composite key)
+  string card_id = 3;         // Card ID (FeliCa UID etc.)
+  string machine_ip = 4;      // Machine IP address
+  string state = 5;           // State (e.g., "in", "out")
+  string state_detail = 6;    // Optional state detail
+}
+
+// DeleteTimeCardLogRequest deletes a timecard log (dev only)
+message DeleteTimeCardLogRequest {
+  string datetime = 1;        // RFC3339 format timestamp
+  int32 id = 2;               // User ID
+}
+
+// DeleteTimeCardLogResponse confirms deletion
+message DeleteTimeCardLogResponse {
   bool success = 1;
   string message = 2;
 }

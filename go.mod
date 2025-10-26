@@ -7,7 +7,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-sqlite3 v1.14.32
-	github.com/yhonda-ohishi/db_service v1.11.0
+	github.com/yhonda-ohishi/db_service v1.12.0
 	golang.org/x/crypto v0.43.0
 	golang.org/x/net v0.46.0
 	google.golang.org/grpc v1.76.0

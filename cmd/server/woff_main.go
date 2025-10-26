@@ -56,15 +56,16 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 type woffAuthServer struct {
 	authv1.UnimplementedAuthServiceServer
-	woffManager       *auth.WOFFManager
-	lineManager       *auth.LINEManager
-	woffStore         *database.WOFFStore
-	responseCache     sync.Map // codeをキーにしてレスポンスをキャッシュ
-	processingCode    sync.Map // 処理中のcodeを追跡
-	prodDB            *dbconfig.ProdDatabase
-	devDB             *gorm.DB
-	timeCardProdRepo  repository.TimeCardRepository
-	timeCardDevRepo   repository.TimeCardDevRepository
+	woffManager          *auth.WOFFManager
+	lineManager          *auth.LINEManager
+	woffStore            *database.WOFFStore
+	responseCache        sync.Map // codeをキーにしてレスポンスをキャッシュ
+	processingCode       sync.Map // 処理中のcodeを追跡
+	prodDB               *dbconfig.ProdDatabase
+	devDB                *gorm.DB
+	timeCardProdRepo     repository.TimeCardRepository
+	timeCardDevRepo      repository.TimeCardDevRepository
+	timeCardLogRepo      repository.TimeCardLogRepository
 }
 
 func newWOFFAuthServer(
@@ -76,12 +77,14 @@ func newWOFFAuthServer(
 ) *woffAuthServer {
 	var timeCardProdRepo repository.TimeCardRepository
 	var timeCardDevRepo repository.TimeCardDevRepository
+	var timeCardLogRepo repository.TimeCardLogRepository
 
 	if prodDB != nil {
 		timeCardProdRepo = repository.NewTimeCardRepository(prodDB)
 	}
 	if devDB != nil {
 		timeCardDevRepo = repository.NewTimeCardDevRepository(devDB)
+		timeCardLogRepo = repository.NewTimeCardLogRepository(devDB)
 	}
 
 	return &woffAuthServer{
@@ -92,6 +95,7 @@ func newWOFFAuthServer(
 		devDB:            devDB,
 		timeCardProdRepo: timeCardProdRepo,
 		timeCardDevRepo:  timeCardDevRepo,
+		timeCardLogRepo:  timeCardLogRepo,
 	}
 }
 
@@ -221,6 +225,60 @@ func (s *connectAuthServer) UpdateTimeCard(ctx context.Context, req *connect.Req
 func (s *connectAuthServer) DeleteTimeCard(ctx context.Context, req *connect.Request[authv1.DeleteTimeCardRequest]) (*connect.Response[authv1.DeleteTimeCardResponse], error) {
 	log.Printf("Connect request: /auth.v1.AuthService/DeleteTimeCard")
 	resp, err := s.grpcServer.DeleteTimeCard(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) GetTimeCardLog(ctx context.Context, req *connect.Request[authv1.GetTimeCardLogRequest]) (*connect.Response[authv1.TimeCardLogResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/GetTimeCardLog")
+	resp, err := s.grpcServer.GetTimeCardLog(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) ListTimeCardLogs(ctx context.Context, req *connect.Request[authv1.ListTimeCardLogsRequest]) (*connect.Response[authv1.ListTimeCardLogsResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/ListTimeCardLogs")
+	resp, err := s.grpcServer.ListTimeCardLogs(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) ListTimeCardLogsByCardID(ctx context.Context, req *connect.Request[authv1.ListTimeCardLogsByCardIDRequest]) (*connect.Response[authv1.ListTimeCardLogsResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/ListTimeCardLogsByCardID")
+	resp, err := s.grpcServer.ListTimeCardLogsByCardID(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) CreateTimeCardLog(ctx context.Context, req *connect.Request[authv1.CreateTimeCardLogRequest]) (*connect.Response[authv1.TimeCardLogResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/CreateTimeCardLog")
+	resp, err := s.grpcServer.CreateTimeCardLog(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) UpdateTimeCardLog(ctx context.Context, req *connect.Request[authv1.UpdateTimeCardLogRequest]) (*connect.Response[authv1.TimeCardLogResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/UpdateTimeCardLog")
+	resp, err := s.grpcServer.UpdateTimeCardLog(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *connectAuthServer) DeleteTimeCardLog(ctx context.Context, req *connect.Request[authv1.DeleteTimeCardLogRequest]) (*connect.Response[authv1.DeleteTimeCardLogResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/DeleteTimeCardLog")
+	resp, err := s.grpcServer.DeleteTimeCardLog(ctx, req.Msg)
 	if err != nil {
 		return nil, err
 	}
@@ -991,6 +1049,282 @@ func (s *woffAuthServer) DeleteTimeCard(ctx context.Context, req *authv1.DeleteT
 	}, nil
 }
 
+// GetTimeCardLog retrieves a timecard log by composite key
+func (s *woffAuthServer) GetTimeCardLog(ctx context.Context, req *authv1.GetTimeCardLogRequest) (*authv1.TimeCardLogResponse, error) {
+	log.Printf("GetTimeCardLog request: environment=%v, datetime=%s, id=%d", req.Environment, req.Datetime, req.Id)
+
+	// Only dev environment is supported for timecard_logs
+	if s.timeCardLogRepo == nil {
+		return nil, status.Error(codes.Unavailable, "timecard log repository not available")
+	}
+
+	// Get from database (datetime is stored as string in TimeCardLog)
+	timeCardLog, err := s.timeCardLogRepo.GetByCompositeKey(req.Datetime, int(req.Id))
+	if err != nil {
+		log.Printf("Failed to get timecard log: %v", err)
+		return nil, status.Errorf(codes.NotFound, "timecard log not found: %v", err)
+	}
+
+	// Convert to proto message
+	stateDetail := ""
+	if timeCardLog.StateDetail != nil {
+		stateDetail = *timeCardLog.StateDetail
+	}
+
+	return &authv1.TimeCardLogResponse{
+		Log: &authv1.TimeCardLog{
+			Datetime:    timeCardLog.Datetime,
+			Id:          int32(timeCardLog.ID),
+			CardId:      timeCardLog.CardID,
+			MachineIp:   timeCardLog.MachineIP,
+			State:       timeCardLog.State,
+			StateDetail: stateDetail,
+			Created:     timeCardLog.Created.Format(time.RFC3339),
+			Modified:    timeCardLog.Modified.Format(time.RFC3339),
+		},
+	}, nil
+}
+
+// ListTimeCardLogs retrieves a list of timecard logs
+func (s *woffAuthServer) ListTimeCardLogs(ctx context.Context, req *authv1.ListTimeCardLogsRequest) (*authv1.ListTimeCardLogsResponse, error) {
+	log.Printf("ListTimeCardLogs request: environment=%v, limit=%d, offset=%d", req.Environment, req.Limit, req.Offset)
+
+	if s.timeCardLogRepo == nil {
+		return nil, status.Error(codes.Unavailable, "timecard log repository not available")
+	}
+
+	// Set defaults
+	limit := int(req.Limit)
+	if limit == 0 {
+		limit = 50
+	} else if limit > 100 {
+		limit = 100
+	}
+
+	offset := int(req.Offset)
+	orderBy := req.OrderBy
+	if orderBy == "" {
+		orderBy = "datetime DESC"
+	}
+
+	// Get from database
+	logs, totalCount, err := s.timeCardLogRepo.GetAll(limit, offset, orderBy)
+	if err != nil {
+		log.Printf("Failed to list timecard logs: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to list timecard logs: %v", err)
+	}
+
+	// Convert to proto messages
+	protoLogs := make([]*authv1.TimeCardLog, 0, len(logs))
+	for _, l := range logs {
+		stateDetail := ""
+		if l.StateDetail != nil {
+			stateDetail = *l.StateDetail
+		}
+
+		protoLogs = append(protoLogs, &authv1.TimeCardLog{
+			Datetime:    l.Datetime,
+			Id:          int32(l.ID),
+			CardId:      l.CardID,
+			MachineIp:   l.MachineIP,
+			State:       l.State,
+			StateDetail: stateDetail,
+			Created:     l.Created.Format(time.RFC3339),
+			Modified:    l.Modified.Format(time.RFC3339),
+		})
+	}
+
+	return &authv1.ListTimeCardLogsResponse{
+		Logs:       protoLogs,
+		TotalCount: totalCount,
+	}, nil
+}
+
+// ListTimeCardLogsByCardID retrieves timecard logs by card_id
+func (s *woffAuthServer) ListTimeCardLogsByCardID(ctx context.Context, req *authv1.ListTimeCardLogsByCardIDRequest) (*authv1.ListTimeCardLogsResponse, error) {
+	log.Printf("ListTimeCardLogsByCardID request: card_id=%s, limit=%d, offset=%d", req.CardId, req.Limit, req.Offset)
+
+	if s.timeCardLogRepo == nil {
+		return nil, status.Error(codes.Unavailable, "timecard log repository not available")
+	}
+
+	// Set defaults
+	limit := int(req.Limit)
+	if limit == 0 {
+		limit = 50
+	} else if limit > 100 {
+		limit = 100
+	}
+
+	offset := int(req.Offset)
+	orderBy := req.OrderBy
+	if orderBy == "" {
+		orderBy = "datetime DESC"
+	}
+
+	// Get from database (GetByCardID does not take orderBy parameter)
+	logs, totalCount, err := s.timeCardLogRepo.GetByCardID(req.CardId, limit, offset)
+	if err != nil {
+		log.Printf("Failed to list timecard logs by card_id: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to list timecard logs: %v", err)
+	}
+
+	// Convert to proto messages
+	protoLogs := make([]*authv1.TimeCardLog, 0, len(logs))
+	for _, l := range logs {
+		stateDetail := ""
+		if l.StateDetail != nil {
+			stateDetail = *l.StateDetail
+		}
+
+		protoLogs = append(protoLogs, &authv1.TimeCardLog{
+			Datetime:    l.Datetime,
+			Id:          int32(l.ID),
+			CardId:      l.CardID,
+			MachineIp:   l.MachineIP,
+			State:       l.State,
+			StateDetail: stateDetail,
+			Created:     l.Created.Format(time.RFC3339),
+			Modified:    l.Modified.Format(time.RFC3339),
+		})
+	}
+
+	return &authv1.ListTimeCardLogsResponse{
+		Logs:       protoLogs,
+		TotalCount: totalCount,
+	}, nil
+}
+
+// CreateTimeCardLog creates a new timecard log
+func (s *woffAuthServer) CreateTimeCardLog(ctx context.Context, req *authv1.CreateTimeCardLogRequest) (*authv1.TimeCardLogResponse, error) {
+	log.Printf("CreateTimeCardLog request: datetime=%s, id=%d, card_id=%s", req.Datetime, req.Id, req.CardId)
+
+	if s.timeCardLogRepo == nil {
+		return nil, status.Error(codes.Unavailable, "timecard log repository not available")
+	}
+
+	// Create timecard log model (datetime is stored as string)
+	now := time.Now()
+	var stateDetail *string
+	if req.StateDetail != "" {
+		stateDetail = &req.StateDetail
+	}
+
+	timeCardLog := &mysql.TimeCardLog{
+		Datetime:    req.Datetime,
+		ID:          int(req.Id),
+		CardID:      req.CardId,
+		MachineIP:   req.MachineIp,
+		State:       req.State,
+		StateDetail: stateDetail,
+		Created:     now,
+		Modified:    now,
+	}
+
+	// Create in database
+	if err := s.timeCardLogRepo.Create(timeCardLog); err != nil {
+		log.Printf("Failed to create timecard log: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to create timecard log: %v", err)
+	}
+
+	log.Printf("✅ Successfully created timecard log: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	// Return created log
+	resultStateDetail := ""
+	if timeCardLog.StateDetail != nil {
+		resultStateDetail = *timeCardLog.StateDetail
+	}
+
+	return &authv1.TimeCardLogResponse{
+		Log: &authv1.TimeCardLog{
+			Datetime:    timeCardLog.Datetime,
+			Id:          int32(timeCardLog.ID),
+			CardId:      timeCardLog.CardID,
+			MachineIp:   timeCardLog.MachineIP,
+			State:       timeCardLog.State,
+			StateDetail: resultStateDetail,
+			Created:     timeCardLog.Created.Format(time.RFC3339),
+			Modified:    timeCardLog.Modified.Format(time.RFC3339),
+		},
+	}, nil
+}
+
+// UpdateTimeCardLog updates an existing timecard log
+func (s *woffAuthServer) UpdateTimeCardLog(ctx context.Context, req *authv1.UpdateTimeCardLogRequest) (*authv1.TimeCardLogResponse, error) {
+	log.Printf("UpdateTimeCardLog request: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	if s.timeCardLogRepo == nil {
+		return nil, status.Error(codes.Unavailable, "timecard log repository not available")
+	}
+
+	// Get existing log (datetime is stored as string)
+	existingLog, err := s.timeCardLogRepo.GetByCompositeKey(req.Datetime, int(req.Id))
+	if err != nil {
+		log.Printf("Failed to find timecard log: %v", err)
+		return nil, status.Errorf(codes.NotFound, "timecard log not found: %v", err)
+	}
+
+	// Update fields
+	existingLog.CardID = req.CardId
+	existingLog.MachineIP = req.MachineIp
+	existingLog.State = req.State
+	if req.StateDetail != "" {
+		existingLog.StateDetail = &req.StateDetail
+	} else {
+		existingLog.StateDetail = nil
+	}
+	existingLog.Modified = time.Now()
+
+	// Update in database
+	if err := s.timeCardLogRepo.Update(existingLog); err != nil {
+		log.Printf("Failed to update timecard log: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to update timecard log: %v", err)
+	}
+
+	log.Printf("✅ Successfully updated timecard log: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	// Return updated log
+	resultStateDetail := ""
+	if existingLog.StateDetail != nil {
+		resultStateDetail = *existingLog.StateDetail
+	}
+
+	return &authv1.TimeCardLogResponse{
+		Log: &authv1.TimeCardLog{
+			Datetime:    existingLog.Datetime,
+			Id:          int32(existingLog.ID),
+			CardId:      existingLog.CardID,
+			MachineIp:   existingLog.MachineIP,
+			State:       existingLog.State,
+			StateDetail: resultStateDetail,
+			Created:     existingLog.Created.Format(time.RFC3339),
+			Modified:    existingLog.Modified.Format(time.RFC3339),
+		},
+	}, nil
+}
+
+// DeleteTimeCardLog deletes a timecard log
+func (s *woffAuthServer) DeleteTimeCardLog(ctx context.Context, req *authv1.DeleteTimeCardLogRequest) (*authv1.DeleteTimeCardLogResponse, error) {
+	log.Printf("DeleteTimeCardLog request: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	if s.timeCardLogRepo == nil {
+		return nil, status.Error(codes.Unavailable, "timecard log repository not available")
+	}
+
+	// Delete from database (datetime is stored as string)
+	if err := s.timeCardLogRepo.Delete(req.Datetime, int(req.Id)); err != nil {
+		log.Printf("Failed to delete timecard log: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to delete timecard log: %v", err)
+	}
+
+	log.Printf("✅ Successfully deleted timecard log: datetime=%s, id=%d", req.Datetime, req.Id)
+
+	return &authv1.DeleteTimeCardLogResponse{
+		Success: true,
+		Message: "Timecard log deleted successfully",
+	}, nil
+}
+
 func main() {
 	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
@@ -1114,15 +1448,28 @@ func main() {
 		"/auth.v1.AuthService/CreateTimeCard",
 		"/auth.v1.AuthService/UpdateTimeCard",
 		"/auth.v1.AuthService/DeleteTimeCard",
+		// TimeCardLog endpoints use FRONTEND_SECRET authentication instead
+		"/auth.v1.AuthService/GetTimeCardLog",
+		"/auth.v1.AuthService/ListTimeCardLogs",
+		"/auth.v1.AuthService/ListTimeCardLogsByCardID",
+		"/auth.v1.AuthService/CreateTimeCardLog",
+		"/auth.v1.AuthService/UpdateTimeCardLog",
+		"/auth.v1.AuthService/DeleteTimeCardLog",
 	}
 
-	// TimeCard endpoints that require FRONTEND_SECRET authentication
+	// TimeCard and TimeCardLog endpoints that require FRONTEND_SECRET authentication
 	secretMethods := []string{
 		"/auth.v1.AuthService/GetTimeCard",
 		"/auth.v1.AuthService/ListTimeCards",
 		"/auth.v1.AuthService/CreateTimeCard",
 		"/auth.v1.AuthService/UpdateTimeCard",
 		"/auth.v1.AuthService/DeleteTimeCard",
+		"/auth.v1.AuthService/GetTimeCardLog",
+		"/auth.v1.AuthService/ListTimeCardLogs",
+		"/auth.v1.AuthService/ListTimeCardLogsByCardID",
+		"/auth.v1.AuthService/CreateTimeCardLog",
+		"/auth.v1.AuthService/UpdateTimeCardLog",
+		"/auth.v1.AuthService/DeleteTimeCardLog",
 	}
 
 	// Get FRONTEND_SECRET for timecard authentication
