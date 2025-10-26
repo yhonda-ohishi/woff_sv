@@ -322,7 +322,7 @@ func loadFlickrTokens() (*FlickrTokens, error) {
 	data, err := os.ReadFile(flickrTokensFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil // File doesn't exist, not an error
+			return nil, fmt.Errorf("tokens file not found")
 		}
 		return nil, fmt.Errorf("failed to read tokens file: %w", err)
 	}
@@ -1903,6 +1903,38 @@ func main() {
 		dbPath = "woff.db"
 		log.Printf("DATABASE_PATH not set, using default: %s", dbPath)
 	}
+
+	// Check Flickr configuration status
+	log.Println("")
+	log.Println("📸 Flickr Integration Status:")
+	flickrAPIKey := os.Getenv("FLICKR_API_KEY")
+	flickrAPISecret := os.Getenv("FLICKR_API_SECRET")
+
+	if flickrAPIKey == "" || flickrAPISecret == "" {
+		log.Println("   ❌ API Keys: Not configured")
+		log.Println("   💡 Set FLICKR_API_KEY and FLICKR_API_SECRET in .env file to enable Flickr uploads")
+		log.Println("   ℹ️  Recordings will be converted to MP4 but not uploaded to Flickr")
+	} else {
+		log.Println("   ✅ API Keys: Configured")
+
+		// Check if OAuth tokens exist
+		if _, err := loadFlickrTokens(); err != nil {
+			log.Println("   ⚠️  OAuth Tokens: Not authenticated")
+			log.Println("")
+			log.Println("   📋 To enable Flickr uploads, follow these steps:")
+			log.Println("      1. Open your browser and visit:")
+			log.Println("         http://localhost:50051/api/flickr/auth")
+			log.Println("      2. Click 'Authorize' to grant permissions to Flickr")
+			log.Println("      3. After authorization, tokens will be saved automatically")
+			log.Println("      4. Restart the server to activate Flickr uploads")
+			log.Println("")
+			log.Println("   ℹ️  Until then: Recordings will be converted to MP4 but not uploaded")
+		} else {
+			log.Println("   ✅ OAuth Tokens: Ready")
+			log.Println("   ℹ️  Flickr uploads enabled")
+		}
+	}
+	log.Println("")
 
 	// Initialize database (optional)
 	var woffStore *database.WOFFStore
