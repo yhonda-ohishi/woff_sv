@@ -110,6 +110,15 @@ func newConnectAuthServer(grpcServer *woffAuthServer) *connectAuthServer {
 	}
 }
 
+func (s *connectAuthServer) Heartbeat(ctx context.Context, req *connect.Request[authv1.HeartbeatRequest]) (*connect.Response[authv1.HeartbeatResponse], error) {
+	log.Printf("Connect request: /auth.v1.AuthService/Heartbeat")
+	resp, err := s.grpcServer.Heartbeat(ctx, req.Msg)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
 func (s *connectAuthServer) GetAuthorizationURL(ctx context.Context, req *connect.Request[authv1.GetAuthorizationURLRequest]) (*connect.Response[authv1.GetAuthorizationURLResponse], error) {
 	resp, err := s.grpcServer.GetAuthorizationURL(ctx, req.Msg)
 	if err != nil {
@@ -283,6 +292,16 @@ func (s *connectAuthServer) DeleteTimeCardLog(ctx context.Context, req *connect.
 		return nil, err
 	}
 	return connect.NewResponse(resp), nil
+}
+
+func (s *woffAuthServer) Heartbeat(ctx context.Context, req *authv1.HeartbeatRequest) (*authv1.HeartbeatResponse, error) {
+	log.Printf("Heartbeat request received")
+
+	return &authv1.HeartbeatResponse{
+		Status:    "ok",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Version:   "1.0.0",
+	}, nil
 }
 
 func (s *woffAuthServer) GetAuthorizationURL(ctx context.Context, req *authv1.GetAuthorizationURLRequest) (*authv1.GetAuthorizationURLResponse, error) {
@@ -1438,6 +1457,7 @@ func main() {
 
 	// Public methods that don't require WOFF authentication
 	publicMethods := []string{
+		"/auth.v1.AuthService/Heartbeat",
 		"/auth.v1.AuthService/GetAuthorizationURL",
 		"/auth.v1.AuthService/ExchangeCode",
 		"/auth.v1.AuthService/RefreshToken",

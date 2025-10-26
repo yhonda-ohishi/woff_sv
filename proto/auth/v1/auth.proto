@@ -14,6 +14,9 @@ enum UserRole {
 
 // AuthService handles WOFF (Works Office) authentication operations
 service AuthService {
+  // Heartbeat returns server status and timestamp
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
   // GetAuthorizationURL returns the WOFF OAuth authorization URL
   rpc GetAuthorizationURL(GetAuthorizationURLRequest) returns (GetAuthorizationURLResponse);
 
@@ -355,4 +358,14 @@ message DeleteTimeCardLogRequest {
 message DeleteTimeCardLogResponse {
   bool success = 1;
   string message = 2;
+}
+
+// HeartbeatRequest is an empty request for heartbeat
+message HeartbeatRequest {}
+
+// HeartbeatResponse returns server status
+message HeartbeatResponse {
+  string status = 1;       // Server status (e.g., "ok")
+  string timestamp = 2;    // Current server timestamp (RFC3339 format)
+  string version = 3;      // Server version (optional)
 }
